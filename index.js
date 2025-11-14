@@ -1,4 +1,4 @@
-// Render サーバーコード (v6: 盤面サイズ、先手/後手 対応)
+// Render サーバーコード (v7: 投了 -> 無効試合DRAW に変更)
 const WebSocket = require('ws');
 
 const port = process.env.PORT || 8080;
@@ -28,7 +28,6 @@ function resetReadyStates(room) {
     });
 }
 
-// ▼▼▼ 新規: デフォルト設定 ▼▼▼
 const defaultSettings = {
     boardSize: 3,
     playerOrder: 'random',
@@ -52,7 +51,6 @@ wss.on('connection', (ws) => {
                 let roomId;
                 do { roomId = generateRoomId(); } while (rooms.has(roomId));
                 
-                // ▼▼▼ 変更: クライアントからの設定をマージ ▼▼▼
                 const settings = { ...defaultSettings, ...(data.settings || {}) };
                 
                 const newRoom = {
@@ -113,20 +111,25 @@ wss.on('connection', (ws) => {
                 break;
             }
             
-            case 'offerSurrender': {
+            // ▼▼▼ 変更: 「無効試合 投票」 ▼▼▼
+            case 'offerDraw': {
                 const opponent = getOpponent(ws);
                 if (opponent) {
-                    opponent.send(JSON.stringify({ type: 'surrenderOffered' }));
+                    console.log(`ルーム ${ws.roomId} でDRAW提案`);
+                    opponent.send(JSON.stringify({ type: 'drawOffered' }));
                 }
                 break;
             }
             
-            case 'acceptSurrender': {
+            // ▼▼▼ 変更: 「無効試合 受諾」 ▼▼▼
+            case 'acceptDraw': {
                 if (!room) break;
-                const opponent = getOpponent(ws); // 提案した人(敗者)
+                console.log(`ルーム ${ws.roomId} でDRAW成立`);
                 
-                if (opponent) opponent.send(JSON.stringify({ type: 'gameLostBySurrender' }));
-                ws.send(JSON.stringify({ type: 'gameWonBySurrender' })); // 受諾した人(勝者)
+                // 両方のプレイヤーにDRAWを通知
+                room.players.forEach(player => {
+                    player.send(JSON.stringify({ type: 'gameDrawnByAgreement' }));
+                });
                 
                 resetReadyStates(room);
                 break;
@@ -141,20 +144,50 @@ wss.on('connection', (ws) => {
                     console.log(`ルーム ${ws.roomId} で試合開始`);
                     resetReadyStates(room);
                     
-                    // ▼▼▼ 新規: 先手/後手 ルール適用 ▼▼▼
                     let firstPlayer = 'O';
                     const order = room.settings.playerOrder;
-                    if (order === 'host_o') {
-                        firstPlayer = 'O';
-                    } else if (order === 'host_x') {
-                        firstPlayer = 'X';
-                    } else { // random
+                    const hostMark = (order === 'host_x') ? 'X' : 'O'; // ホストがOかXか
+                    
+                    if (order === 'random') {
                         firstPlayer = (Math.random() < 0.5 ? 'O' : 'X');
+                    } else {
+                        // ホストがO希望なら先手はO、ホストがX希望なら先手はX
+                        firstPlayer = hostMark;
                     }
                     
+                    // サーバー側はO/Xで管理し、クライアント側は firstPlayer で管理
                     room.players.forEach(player => {
-                        player.send(JSON.stringify({ type: 'startMatch', firstPlayer: firstPlayer }));
-                    });
+                        const playerMark = (player === room.players[0]) ? hostMark : (hostMark === 'O' ? 'X' : 'O');
+                        
+                        // O/Xの割り当ては変えないが、手番だけを firstPlayer に合わせる
+                        // (クライアント側は自分のマークと firstPlayer を比較して手番を判断する)
+                        // ...と思ったが、クライアント側はOが先手と仮定してしまっている。
+                        // サーバー側でO/Xの割り当て自体を変更する
+                    }
+                    
+                    // --- 先手/後手ロジックの修正 ---
+                    const host = room.players[0];
+                    const guest = room.players[1];
+                    let oPlayer = host;
+                    let xPlayer = guest;
+                    
+                    if (order === 'host_o') {
+                        oPlayer = host; xPlayer = guest; firstPlayer = 'O';
+                    } else if (order === 'host_x') {
+                        oPlayer = guest; xPlayer = host; firstPlayer = 'O'; // Xがホスト=ゲストがO (先手)
+                    } else if (order === 'random') {
+                        if (Math.random() < 0.5) { // ホストがO
+                            oPlayer = host; xPlayer = guest; firstPlayer = 'O';
+                        } else { // ゲストがO
+                            oPlayer = guest; xPlayer = host; firstPlayer = 'O';
+                        }
+                    }
+                    
+                    // ※現状の実装では、クライアント(v6)はOが先手(firstPlayer)であると仮定している
+                    // そのため、O/Xの割り当てを変更し、firstPlayerは常に'O'を渡す
+                    
+                    oPlayer.send(JSON.stringify({ type: 'startMatch', firstPlayer: 'O' }));
+                    xPlayer.send(JSON.stringify({ type: 'startMatch', firstPlayer: 'O' }));
                 }
                 break;
             }

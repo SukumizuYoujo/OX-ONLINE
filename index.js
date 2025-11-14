@@ -1,4 +1,4 @@
-// Render サーバーコード (v8: 多人数ロビー, 観戦, チャット対応)
+// Render サーバーコード (v8.1: 多人数ロビー, 観戦, チャット, 無効試合DRAW 対応)
 const WebSocket = require('ws');
 
 const port = process.env.PORT || 8080;
@@ -16,7 +16,6 @@ wss.on('listening', () => {
 
 // === ヘルパー関数 ===
 
-// ルームの全員にブロードキャスト
 function broadcast(room, message, excludeWs = null) {
     if (!room) return;
     const stringMessage = JSON.stringify(message);
@@ -27,19 +26,6 @@ function broadcast(room, message, excludeWs = null) {
     });
 }
 
-// ルームの対戦者2人だけに送信
-function broadcastToPlayers(room, message) {
-    if (!room) return;
-    const stringMessage = JSON.stringify(message);
-    if (room.playerO && room.playerO.readyState === WebSocket.OPEN) {
-        room.playerO.send(stringMessage);
-    }
-    if (room.playerX && room.playerX.readyState === WebSocket.OPEN) {
-        room.playerX.send(stringMessage);
-    }
-}
-
-// ルームの現在の状態(ロビー情報)を取得
 function getLobbyState(room) {
     const playerO_Info = room.playerO ? room.players.get(room.playerO) : null;
     const playerX_Info = room.playerX ? room.players.get(room.playerX) : null;
@@ -59,7 +45,6 @@ function getLobbyState(room) {
     };
 }
 
-// プレイヤーの準備状態をリセット
 function resetReadyStates(room) {
     room.players.forEach(playerInfo => {
         playerInfo.isReadyForMatch = false;
@@ -78,15 +63,14 @@ const defaultSettings = {
 
 wss.on('connection', (ws) => {
     console.log('クライアントが接続しました。');
-
-    // 接続時にwsにカスタムプロパティを初期化
     ws.roomId = null;
 
     ws.on('message', (message) => {
         let data;
-        try { data = JSON.parse(message); } catch (e) { return; }
+        try { data = JSON.parse(message); } catch (e) { console.error('Invalid JSON:', e); return; }
         
         const room = rooms.get(ws.roomId);
+        const playerInfo = room ? room.players.get(ws) : null;
 
         switch (data.type) {
             case 'createRoom': {
@@ -98,21 +82,23 @@ wss.on('connection', (ws) => {
                 
                 const newRoom = {
                     settings: settings,
-                    players: new Map(), // ws -> { username }
+                    players: new Map(),
                     playerO: null,
                     playerX: null,
                     gameState: 'LOBBY',
+                    host: ws,
                 };
                 
-                newRoom.players.set(ws, { username: username });
+                newRoom.players.set(ws, { username: username, mark: 'SPECTATOR' });
                 rooms.set(roomId, newRoom);
                 ws.roomId = roomId;
 
                 ws.send(JSON.stringify({ 
                     type: 'roomJoined', 
                     isHost: true,
-                    mark: 'SPECTATOR', // 初期は観戦者
-                    lobby: getLobbyState(newRoom)
+                    mark: 'SPECTATOR',
+                    lobby: getLobbyState(newRoom),
+                    roomId: roomId
                 }));
                 console.log(`[${roomId}] ${username} がルームを作成しました。`);
                 break;
@@ -127,25 +113,21 @@ wss.on('connection', (ws) => {
                     ws.send(JSON.stringify({ type: 'error', message: 'ルームが見つかりません。' })); return;
                 }
                 
-                // 接続をルームに追加
-                joinedRoom.players.set(ws, { username: username });
+                joinedRoom.players.set(ws, { username: username, mark: 'SPECTATOR' });
                 ws.roomId = roomId;
 
-                // 参加した本人に通知
                 ws.send(JSON.stringify({ 
                     type: 'roomJoined', 
                     isHost: false,
                     mark: 'SPECTATOR',
-                    lobby: getLobbyState(joinedRoom)
+                    lobby: getLobbyState(joinedRoom),
+                    roomId: roomId
                 }));
                 
-                // 他の全員にロビー更新とチャット通知を送信
-                broadcast(joinedRoom, { 
-                    type: 'lobbyUpdate', 
-                    lobby: getLobbyState(joinedRoom) 
-                }, ws);
+                broadcast(joinedRoom, { type: 'lobbyUpdate', lobby: getLobbyState(joinedRoom) }, ws);
                 broadcast(joinedRoom, {
                     type: 'newChat',
+                    from: 'システム',
                     message: `${username} が入室しました。`,
                     isNotification: true
                 }, ws);
@@ -155,78 +137,68 @@ wss.on('connection', (ws) => {
             }
 
             case 'updateSettings': {
-                if (room && room.players.get(ws) && room.players.keys().next().value === ws) { // ホストのみ
+                if (room && room.host === ws) {
                     room.settings = { ...room.settings, ...(data.settings || {}) };
                     console.log(`[${ws.roomId}] 設定が更新されました。`);
                     
                     broadcast(room, { 
                         type: 'settingsUpdated', 
                         settings: room.settings 
-                    });
+                    }, ws);
                 }
                 break;
             }
             
-            // ▼▼▼ 新規: スロット参加 ▼▼▼
             case 'takeSlot': {
-                if (!room || room.gameState !== 'LOBBY') return;
-                const playerInfo = room.players.get(ws);
-                if (!playerInfo) return;
+                if (!room || room.gameState !== 'LOBBY' || !playerInfo) return;
+                if (room.playerO === ws || room.playerX === ws) return;
 
                 if (data.slot === 'O' && !room.playerO) {
                     room.playerO = ws;
-                    ws.send(JSON.stringify({ type: 'youTookSlot', slot: 'O', lobby: getLobbyState(room) }));
-                    broadcast(room, { type: 'lobbyUpdate', lobby: getLobbyState(room) }, ws);
-                    console.log(`[${ws.roomId}] ${playerInfo.username} が O に着席`);
+                    playerInfo.mark = 'O';
                 } else if (data.slot === 'X' && !room.playerX) {
                     room.playerX = ws;
-                    ws.send(JSON.stringify({ type: 'youTookSlot', slot: 'X', lobby: getLobbyState(room) }));
-                    broadcast(room, { type: 'lobbyUpdate', lobby: getLobbyState(room) }, ws);
-                    console.log(`[${ws.roomId}] ${playerInfo.username} が X に着席`);
+                    playerInfo.mark = 'X';
                 } else {
                     ws.send(JSON.stringify({ type: 'error', message: 'スロットは既に埋まっています。' }));
+                    return;
                 }
+                
+                ws.send(JSON.stringify({ type: 'youTookSlot', slot: data.slot, lobby: getLobbyState(room) }));
+                broadcast(room, { type: 'lobbyUpdate', lobby: getLobbyState(room) }, ws);
                 break;
             }
             
-            // ▼▼▼ 新規: スロット退出 ▼▼▼
             case 'leaveSlot': {
-                if (!room) return;
-                const playerInfo = room.players.get(ws);
-                if (!playerInfo) return;
+                if (!room || !playerInfo) return;
 
-                if (data.slot === 'O' && room.playerO === ws) {
+                if (room.playerO === ws) {
                     room.playerO = null;
-                    ws.send(JSON.stringify({ type: 'youLeftSlot', lobby: getLobbyState(room) }));
-                    broadcast(room, { type: 'lobbyUpdate', lobby: getLobbyState(room) }, ws);
-                    console.log(`[${ws.roomId}] ${playerInfo.username} が O から離席`);
-                } else if (data.slot === 'X' && room.playerX === ws) {
+                } else if (room.playerX === ws) {
                     room.playerX = null;
-                    ws.send(JSON.stringify({ type: 'youLeftSlot', lobby: getLobbyState(room) }));
-                    broadcast(room, { type: 'lobbyUpdate', lobby: getLobbyState(room) }, ws);
-                    console.log(`[${ws.roomId}] ${playerInfo.username} が X から離席`);
+                } else {
+                    return;
                 }
+                
+                playerInfo.mark = 'SPECTATOR';
+                ws.send(JSON.stringify({ type: 'youLeftSlot', lobby: getLobbyState(room) }));
+                broadcast(room, { type: 'lobbyUpdate', lobby: getLobbyState(room) }, ws);
                 break;
             }
             
-            // ▼▼▼ 新規: チャット ▼▼▼
             case 'chat': {
-                if (!room) return;
-                const playerInfo = room.players.get(ws);
-                if (playerInfo && data.message) {
+                if (room && playerInfo && data.message) {
                     broadcast(room, {
                         type: 'newChat',
                         from: playerInfo.username,
                         message: data.message
-                    }, ws); // 送信者以外にブロードキャスト
+                    }, ws);
                 }
                 break;
             }
 
             case 'readyForMatch': {
-                if (!room || !room.playerO || !room.playerX) return; // 両方埋まってないとダメ
-                const playerInfo = room.players.get(ws);
-                if (!playerInfo) return;
+                if (!room || !playerInfo || !room.playerO || !room.playerX) return;
                 
                 playerInfo.isReadyForMatch = true;
                 
@@ -239,71 +211,47 @@ wss.on('connection', (ws) => {
                     resetReadyStates(room);
                     
                     const order = room.settings.playerOrder;
-                    const hostMark = (order === 'host_x') ? 'X' : 'O'; // ホストが希望したマーク
+                    const hostWs = room.host;
                     
-                    let oPlayer = room.players.keys().next().value; // デフォルトでホストがO
-                    let xPlayer = null;
+                    let oPlayer = room.playerO;
+                    let xPlayer = room.playerX;
                     
-                    room.players.forEach((p, w) => {
-                        if (w !== oPlayer) xPlayer = w; // 暫定
-                    });
-                    
-                    const hostWs = room.players.keys().next().value;
-                    const guestWs = Array.from(room.players.keys())[1] || null; // 2人目 (ゲストとは限らない)
-                    
-                    // 実際に対戦する2人
-                    oPlayer = room.playerO;
-                    xPlayer = room.playerX;
-                    
-                    let firstPlayer = 'O'; // 先手はO
-
-                    // サーバー側でO/Xの割り当てを決定
-                    if (order === 'host_o') { // ホストがO希望
-                        if (hostWs === oPlayer) { oPlayer = hostWs; xPlayer = guestWs; }
-                        else { oPlayer = hostWs; xPlayer = guestWs; } // ホストがOスロットにいる
-                    } else if (order === 'host_x') { // ホストがX希望
-                        if (hostWs === xPlayer) { oPlayer = guestWs; xPlayer = hostWs; }
-                        else { oPlayer = guestWs; xPlayer = hostWs; } // ホストがXスロットにいる
-                    } else if (order === 'random') {
-                        if (Math.random() < 0.5) {
-                            // oPlayer, xPlayer はスロット通り
-                        } else {
-                            // O/X入れ替え
-                            [oPlayer, xPlayer] = [xPlayer, oPlayer];
-                        }
+                    if (order === 'host_o' && hostWs === room.playerX) {
+                        [oPlayer, xPlayer] = [xPlayer, oPlayer];
+                    } else if (order === 'host_x' && hostWs === room.playerO) {
+                        [oPlayer, xPlayer] = [xPlayer, oPlayer];
+                    } else if (order === 'random' && Math.random() < 0.5) {
+                        [oPlayer, xPlayer] = [xPlayer, oPlayer];
                     }
                     
-                    // 最終的なマークを格納 (重要)
+                    room.playerO = oPlayer;
+                    room.playerX = xPlayer;
                     room.players.get(oPlayer).mark = 'O';
                     room.players.get(xPlayer).mark = 'X';
                     
-                    // 観戦者にもマークを伝える
                     room.players.forEach((p, w) => {
                        if (w !== oPlayer && w !== xPlayer) p.mark = 'SPECTATOR';
                     });
                     
-                    // 全員に試合開始を通知
                     broadcast(room, { type: 'matchStarting', firstPlayer: 'O' });
                 }
                 break;
             }
             
             case 'move': {
-                if (!room || room.gameState !== 'IN_GAME') return;
-                const playerInfo = room.players.get(ws);
-                if (!playerInfo) return;
+                if (!room || room.gameState !== 'IN_GAME' || !playerInfo) return;
                 
-                const playerMark = (ws === room.playerO) ? 'O' : 'X';
+                const expectedMark = (ws === room.playerO) ? 'O' : 'X';
                 
                 broadcast(room, { 
                     type: 'boardUpdate', 
                     cellIndex: data.cellIndex,
-                    player: playerMark // O or X
+                    player: expectedMark
                 });
                 break;
             }
             
-            case 'gameOver': { // クライアントからの勝敗申告
+            case 'gameOver': {
                 if (!room || room.gameState !== 'IN_GAME') return;
                 room.gameState = 'POST_GAME';
                 console.log(`[${ws.roomId}] 試合終了: ${data.result}`);
@@ -312,6 +260,7 @@ wss.on('connection', (ws) => {
                 break;
             }
             
+            // ▼▼▼ 変更: 「無効試合 投票」 ▼▼▼
             case 'offerDraw': {
                 const opponent = (ws === room.playerO) ? room.playerX : room.playerO;
                 if (opponent) {
@@ -320,8 +269,9 @@ wss.on('connection', (ws) => {
                 break;
             }
             
+            // ▼▼▼ 変更: 「無効試合 受諾」 ▼▼▼
             case 'acceptDraw': {
-                if (!room) break;
+                if (!room || room.gameState !== 'IN_GAME') break;
                 console.log(`[${ws.roomId}] 合意DRAW成立`);
                 room.gameState = 'POST_GAME';
                 broadcast(room, { type: 'gameDrawnByAgreement' });
@@ -331,12 +281,8 @@ wss.on('connection', (ws) => {
             
             case 'readyForLobby': {
                 if (!room || room.gameState !== 'POST_GAME') return;
-                const playerInfo = room.players.get(ws);
-                if (!playerInfo) return;
-
-                playerInfo.isReadyForLobby = true;
+                if (playerInfo) playerInfo.isReadyForLobby = true;
                 
-                // 対戦者と観戦者全員の準備OKを待つ
                 let allReady = true;
                 room.players.forEach(p => {
                     if (!p.isReadyForLobby) allReady = false;
@@ -349,9 +295,12 @@ wss.on('connection', (ws) => {
                     room.playerX = null;
                     resetReadyStates(room);
                     
+                    room.players.forEach(p => p.mark = 'SPECTATOR');
+                    
                     broadcast(room, { 
                         type: 'returnToLobby',
-                        lobby: getLobbyState(room)
+                        lobby: getLobbyState(room),
+                        roomId: ws.roomId
                     });
                 }
                 break;
@@ -366,10 +315,8 @@ wss.on('connection', (ws) => {
             const playerInfo = room.players.get(ws);
             const username = playerInfo ? playerInfo.username : '不明なユーザー';
             
-            // プレイヤーリストから削除
             room.players.delete(ws);
             
-            // スロットにいたら空ける
             let wasPlayer = false;
             if (room.playerO === ws) {
                 room.playerO = null;
@@ -381,32 +328,56 @@ wss.on('connection', (ws) => {
             }
             
             if (room.players.size === 0) {
-                // 最後の1人ならルーム削除
                 rooms.delete(ws.roomId);
                 console.log(`[${ws.roomId}] 最後のユーザーが退出。ルーム削除。`);
             } else {
-                // 他の人に通知
+                // ホストの移譲
+                if (room.host === ws) {
+                    room.host = room.players.keys().next().value; // 次の人をホストに
+                    const newHostInfo = room.players.get(room.host);
+                    console.log(`[${ws.roomId}] ホストが ${newHostInfo.username} に移譲されました。`);
+                    
+                    // 新ホストにロビー更新(設定ボタン表示のため)と通知
+                    if(room.host.readyState === WebSocket.OPEN) {
+                        room.host.send(JSON.stringify({ type: 'lobbyUpdate', lobby: getLobbyState(room) }));
+                        room.host.send(JSON.stringify({
+                            type: 'newChat',
+                            from: 'システム',
+                            message: 'あなたが新しいホストになりました。設定を変更できます。',
+                            isNotification: true
+                        }));
+                    }
+                }
+                
+                // 試合中の対戦相手が切断
                 if (room.gameState === 'IN_GAME' && wasPlayer) {
-                    // 試合中の対戦相手が切断
-                    room.gameState = 'LOBBY'; // 強制的にロビーに戻す
+                    room.gameState = 'LOBBY';
                     room.playerO = null;
                     room.playerX = null;
                     broadcast(room, {
                         type: 'opponentDisconnected',
-                        lobby: getLobbyState(room)
+                        lobby: getLobbyState(room),
+                        roomId: ws.roomId
+                    });
+                    broadcast(room, {
+                        type: 'newChat',
+                        from: 'システム',
+                        message: `対戦者 ${username} が切断したため、試合は中断されました。`,
+                        isNotification: true
                     });
                 } else {
-                    // それ以外の退出 (ロビー、観戦者など)
+                    // それ以外の退出
                     broadcast(room, { 
                         type: 'lobbyUpdate', 
                         lobby: getLobbyState(room)
                     });
+                    broadcast(room, {
+                        type: 'newChat',
+                        from: 'システム',
+                        message: `${username} が退出しました。`,
+                        isNotification: true
+                    });
                 }
-                broadcast(room, {
-                    type: 'newChat',
-                    message: `${username} が退出しました。`,
-                    isNotification: true
-                });
             }
         }
     });

@@ -1,4 +1,4 @@
-// Render サーバーコード (v4: createRoom のバグ修正)
+// Render サーバーコード (v6: 盤面サイズ、先手/後手 対応)
 const WebSocket = require('ws');
 
 const port = process.env.PORT || 8080;
@@ -14,16 +14,32 @@ wss.on('listening', () => {
     console.log(`WebSocketサーバーが ${port} 番ポートで起動しました。`);
 });
 
-// 相手プレイヤーを取得するヘルパー関数
+// ヘルパー関数
 function getOpponent(ws) {
     const room = rooms.get(ws.roomId);
     if (!room || room.players.length < 2) return null;
     return room.players.find(player => player !== ws);
 }
 
+function resetReadyStates(room) {
+    room.players.forEach(player => {
+        player.isReadyForMatch = false;
+        player.isReadyForLobby = false;
+    });
+}
+
+// ▼▼▼ 新規: デフォルト設定 ▼▼▼
+const defaultSettings = {
+    boardSize: 3,
+    playerOrder: 'random',
+    limitMode: false,
+    highlightOldest: false
+};
+
 wss.on('connection', (ws) => {
     console.log('クライアントが接続しました。');
-    ws.isReadyForNextMatch = false; 
+    ws.isReadyForMatch = false; 
+    ws.isReadyForLobby = false;
 
     ws.on('message', (message) => {
         let data;
@@ -36,17 +52,16 @@ wss.on('connection', (ws) => {
                 let roomId;
                 do { roomId = generateRoomId(); } while (rooms.has(roomId));
                 
-                // ▼▼▼ 修正: クライアントから送られた設定を使う ▼▼▼
-                const settings = data.settings || { limitMode: false, highlightOldest: false };
+                // ▼▼▼ 変更: クライアントからの設定をマージ ▼▼▼
+                const settings = { ...defaultSettings, ...(data.settings || {}) };
                 
                 const newRoom = {
                     players: [ws],
-                    settings: settings, // <-- 適用
+                    settings: settings,
                 };
                 
                 rooms.set(roomId, newRoom);
                 ws.roomId = roomId;
-                ws.isReadyForNextMatch = false;
 
                 ws.send(JSON.stringify({ type: 'roomCreated', roomId: roomId }));
                 console.log(`ルーム作成: ${roomId}`);
@@ -55,8 +70,13 @@ wss.on('connection', (ws) => {
             
             case 'updateSettings': {
                 if (room && room.players[0] === ws) { // ホストのみ
-                    room.settings = data.settings;
+                    room.settings = { ...room.settings, ...(data.settings || {}) };
                     console.log(`ルーム ${ws.roomId} の設定が更新されました。`);
+                    
+                    const opponent = getOpponent(ws);
+                    if (opponent) {
+                        opponent.send(JSON.stringify({ type: 'settingsUpdated', settings: room.settings }));
+                    }
                 }
                 break;
             }
@@ -74,14 +94,14 @@ wss.on('connection', (ws) => {
 
                 joinedRoom.players.push(ws);
                 ws.roomId = roomId;
-                ws.isReadyForNextMatch = false;
 
                 console.log(`ルーム参加: ${roomId}`);
+                resetReadyStates(joinedRoom);
 
                 const [host, guest] = joinedRoom.players;
                 
-                host.send(JSON.stringify({ type: 'gameStart', mark: 'O', settings: joinedRoom.settings }));
-                guest.send(JSON.stringify({ type: 'gameStart', mark: 'X', settings: joinedRoom.settings }));
+                host.send(JSON.stringify({ type: 'gameStart', mark: 'O', settings: joinedRoom.settings, isHost: true }));
+                guest.send(JSON.stringify({ type: 'gameStart', mark: 'X', settings: joinedRoom.settings, isHost: false }));
                 break;
             }
 
@@ -93,37 +113,63 @@ wss.on('connection', (ws) => {
                 break;
             }
             
-            case 'offerDraw': {
+            case 'offerSurrender': {
                 const opponent = getOpponent(ws);
                 if (opponent) {
-                    console.log(`ルーム ${ws.roomId} でDRAW提案`);
                     opponent.send(JSON.stringify({ type: 'surrenderOffered' }));
                 }
                 break;
             }
             
-            case 'acceptDraw': {
+            case 'acceptSurrender': {
                 if (!room) break;
-                console.log(`ルーム ${ws.roomId} でDRAW成立`);
-                room.players.forEach(player => {
-                    player.isReadyForNextMatch = false;
-                    player.send(JSON.stringify({ type: 'gameDrawnByAgreement' }));
-                });
+                const opponent = getOpponent(ws); // 提案した人(敗者)
+                
+                if (opponent) opponent.send(JSON.stringify({ type: 'gameLostBySurrender' }));
+                ws.send(JSON.stringify({ type: 'gameWonBySurrender' })); // 受諾した人(勝者)
+                
+                resetReadyStates(room);
                 break;
             }
             
-            case 'readyForNextMatch': {
-                ws.isReadyForNextMatch = true;
+            case 'readyForMatch': {
+                if (!room) break;
+                ws.isReadyForMatch = true;
                 const opponent = getOpponent(ws);
 
-                if (opponent && opponent.isReadyForNextMatch) {
-                    console.log(`ルーム ${ws.roomId} で次の対戦が開始されます。`);
+                if (opponent && opponent.isReadyForMatch) {
+                    console.log(`ルーム ${ws.roomId} で試合開始`);
+                    resetReadyStates(room);
                     
-                    const firstPlayer = 'O'; // TODO: 手番入れ替え
+                    // ▼▼▼ 新規: 先手/後手 ルール適用 ▼▼▼
+                    let firstPlayer = 'O';
+                    const order = room.settings.playerOrder;
+                    if (order === 'host_o') {
+                        firstPlayer = 'O';
+                    } else if (order === 'host_x') {
+                        firstPlayer = 'X';
+                    } else { // random
+                        firstPlayer = (Math.random() < 0.5 ? 'O' : 'X');
+                    }
                     
                     room.players.forEach(player => {
-                        player.isReadyForNextMatch = false;
-                        player.send(JSON.stringify({ type: 'startNextMatch', firstPlayer: firstPlayer }));
+                        player.send(JSON.stringify({ type: 'startMatch', firstPlayer: firstPlayer }));
+                    });
+                }
+                break;
+            }
+            
+            case 'readyForLobby': {
+                if (!room) break;
+                ws.isReadyForLobby = true;
+                const opponent = getOpponent(ws);
+                
+                if (opponent && opponent.isReadyForLobby) {
+                    console.log(`ルーム ${ws.roomId} でロビーに戻る`);
+                    resetReadyStates(room);
+                    
+                    room.players.forEach(player => {
+                        player.send(JSON.stringify({ type: 'returnToLobby' }));
                     });
                 }
                 break;

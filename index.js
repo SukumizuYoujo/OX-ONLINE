@@ -1,4 +1,4 @@
-// Render サーバーコード (v3: 投了/無効試合の提案に対応)
+// Render サーバーコード (v4: createRoom のバグ修正)
 const WebSocket = require('ws');
 
 const port = process.env.PORT || 8080;
@@ -36,14 +36,17 @@ wss.on('connection', (ws) => {
                 let roomId;
                 do { roomId = generateRoomId(); } while (rooms.has(roomId));
                 
+                // ▼▼▼ 修正: クライアントから送られた設定を使う ▼▼▼
+                const settings = data.settings || { limitMode: false, highlightOldest: false };
+                
                 const newRoom = {
                     players: [ws],
-                    settings: { limitMode: false, highlightOldest: false },
+                    settings: settings, // <-- 適用
                 };
                 
                 rooms.set(roomId, newRoom);
                 ws.roomId = roomId;
-                ws.isReadyForNextMatch = false; // 念のためリセット
+                ws.isReadyForNextMatch = false;
 
                 ws.send(JSON.stringify({ type: 'roomCreated', roomId: roomId }));
                 console.log(`ルーム作成: ${roomId}`);
@@ -71,7 +74,7 @@ wss.on('connection', (ws) => {
 
                 joinedRoom.players.push(ws);
                 ws.roomId = roomId;
-                ws.isReadyForNextMatch = false; // 念のためリセット
+                ws.isReadyForNextMatch = false;
 
                 console.log(`ルーム参加: ${roomId}`);
 
@@ -90,7 +93,6 @@ wss.on('connection', (ws) => {
                 break;
             }
             
-            // ▼▼▼ 新規: 投了/無効試合の提案 ▼▼▼
             case 'offerDraw': {
                 const opponent = getOpponent(ws);
                 if (opponent) {
@@ -100,11 +102,9 @@ wss.on('connection', (ws) => {
                 break;
             }
             
-            // ▼▼▼ 新規: 投了/無効試合の受諾 ▼▼▼
             case 'acceptDraw': {
                 if (!room) break;
                 console.log(`ルーム ${ws.roomId} でDRAW成立`);
-                // 両方の準備状態をリセット
                 room.players.forEach(player => {
                     player.isReadyForNextMatch = false;
                     player.send(JSON.stringify({ type: 'gameDrawnByAgreement' }));
@@ -119,20 +119,12 @@ wss.on('connection', (ws) => {
                 if (opponent && opponent.isReadyForNextMatch) {
                     console.log(`ルーム ${ws.roomId} で次の対戦が開始されます。`);
                     
-                    room.players.forEach(player => {
-                        player.isReadyForNextMatch = false;
-                    });
-                    
                     const firstPlayer = 'O'; // TODO: 手番入れ替え
                     
                     room.players.forEach(player => {
+                        player.isReadyForNextMatch = false;
                         player.send(JSON.stringify({ type: 'startNextMatch', firstPlayer: firstPlayer }));
                     });
-                } else if (opponent) {
-                    // 自分が準備完了したことを相手に伝える（相手側で「準備完了」に切り替えるため）
-                    // ※クライアント側で「相手の準備待ち」と表示するために利用
-                    // opponent.send(JSON.stringify({ type: 'opponentIsReady' }));
-                    // → 今回の実装ではクライアント側で「相手待ち」と表示するだけなので、サーバーからの通知は不要
                 }
                 break;
             }
@@ -145,7 +137,6 @@ wss.on('connection', (ws) => {
         if (opponent) {
             opponent.send(JSON.stringify({ type: 'opponentDisconnected' }));
         }
-        // ルームからプレイヤーを削除し、ルームが空になればルーム自体を削除
         const room = rooms.get(ws.roomId);
         if (room) {
             room.players = room.players.filter(p => p !== ws);

@@ -99,7 +99,7 @@ wss.on('connection', (ws) => {
                     maxPlayers: settings.maxPlayers 
                 };
                 
-                newRoom.players.set(ws, { username: username, mark: 'SPECTATOR', slotCooldownUntil: 0 });
+                newRoom.players.set(ws, { username: username, mark: 'SPECTATOR', slotCooldownUntil: 0 }); // クールダウン用
                 rooms.set(roomId, newRoom);
                 ws.roomId = roomId;
 
@@ -127,7 +127,7 @@ wss.on('connection', (ws) => {
                     ws.send(JSON.stringify({ type: 'error', message: 'ルームは満員です。' })); return;
                 }
                 
-                joinedRoom.players.set(ws, { username: username, mark: 'SPECTATOR', slotCooldownUntil: 0 });
+                joinedRoom.players.set(ws, { username: username, mark: 'SPECTATOR', slotCooldownUntil: 0 }); // クールダウン用
                 ws.roomId = roomId;
 
                 ws.send(JSON.stringify({ 
@@ -467,10 +467,13 @@ wss.on('connection', (ws) => {
                 
                 const lobbyState = getLobbyState(room);
                 
-                if (room.gameState === 'IN_GAME' && wasPlayer) {
-                    room.gameState = 'LOBBY';
+                // 試合中にプレイヤーが切断した場合
+                if ((room.gameState === 'IN_GAME' || room.gameState === 'POST_GAME') && wasPlayer) {
+                    room.gameState = 'LOBBY'; // 強制的にロビーに戻す
                     room.playerO = null;
                     room.playerX = null;
+                    resetReadyStates(room); // 準備状態もリセット
+                    
                     broadcast(room, {
                         type: 'opponentDisconnected',
                         lobby: lobbyState,
@@ -484,6 +487,7 @@ wss.on('connection', (ws) => {
                         isNotification: true
                     });
                 } else {
+                    // ロビーで観戦者が退出した場合
                     broadcast(room, { 
                         type: 'lobbyUpdate', 
                         lobby: lobbyState,

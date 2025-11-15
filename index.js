@@ -1,4 +1,4 @@
-// Render サーバーコード (v8.3: 公開ルーム, 最大人数, 無効試合 対応)
+// Render サーバーコード (v8.4: 降参・ロビー即時帰還 対応)
 const WebSocket = require('ws');
 
 const port = process.env.PORT || 8080;
@@ -51,7 +51,7 @@ function getLobbyState(room) {
 function resetReadyStates(room) {
     room.players.forEach(playerInfo => {
         playerInfo.isReadyForMatch = false;
-        playerInfo.isReadyForLobby = false;
+        // playerInfo.isReadyForLobby = false; // 廃止
     });
 }
 
@@ -60,8 +60,8 @@ const defaultSettings = {
     playerOrder: 'random',
     limitMode: false,
     highlightOldest: false,
-    isPublic: true, // 新規
-    maxPlayers: 10  // 新規
+    isPublic: true, 
+    maxPlayers: 10
 };
 
 // === 接続処理 ===
@@ -83,21 +83,20 @@ wss.on('connection', (ws) => {
                 do { roomId = generateRoomId(); } while (rooms.has(roomId));
                 
                 const settings = { ...defaultSettings, ...(data.settings || {}) };
-                // 人数バリデーション
                 settings.maxPlayers = Math.max(2, Math.min(100, settings.maxPlayers || 10));
                 
                 const username = data.username || `User${Math.floor(Math.random() * 1000)}`;
                 
                 const newRoom = {
-                    id: roomId, // 新規 (ルーム一覧用)
+                    id: roomId, 
                     settings: settings,
                     players: new Map(),
                     playerO: null,
                     playerX: null,
                     gameState: 'LOBBY',
                     host: ws,
-                    isPublic: settings.isPublic, // 新規
-                    maxPlayers: settings.maxPlayers // 新規
+                    isPublic: settings.isPublic, 
+                    maxPlayers: settings.maxPlayers 
                 };
                 
                 newRoom.players.set(ws, { username: username, mark: 'SPECTATOR' });
@@ -124,7 +123,6 @@ wss.on('connection', (ws) => {
                     ws.send(JSON.stringify({ type: 'error', message: 'ルームが見つかりません。' })); return;
                 }
                 
-                // ▼▼▼ 満員チェック ▼▼▼
                 if (joinedRoom.players.size >= joinedRoom.maxPlayers) {
                     ws.send(JSON.stringify({ type: 'error', message: 'ルームは満員です。' })); return;
                 }
@@ -134,7 +132,7 @@ wss.on('connection', (ws) => {
 
                 ws.send(JSON.stringify({ 
                     type: 'roomJoined', 
-                    isHost: (joinedRoom.host === ws), // 自分がホストか
+                    isHost: (joinedRoom.host === ws),
                     mark: 'SPECTATOR',
                     lobby: getLobbyState(joinedRoom),
                     roomId: roomId
@@ -155,10 +153,8 @@ wss.on('connection', (ws) => {
             case 'updateSettings': {
                 if (room && room.host === ws) {
                     room.settings = { ...room.settings, ...(data.settings || {}) };
-                    // ▼▼▼ 人数と公開設定も更新 ▼▼▼
                     room.settings.maxPlayers = Math.max(2, Math.min(100, room.settings.maxPlayers || 10));
                     room.maxPlayers = room.settings.maxPlayers;
-                    // room.isPublic = room.settings.isPublic; // (公開設定は作成時のみ)
                     
                     console.log(`[${ws.roomId}] 設定が更新されました。`);
                     
@@ -170,7 +166,6 @@ wss.on('connection', (ws) => {
                 break;
             }
 
-            // ▼▼▼ ルーム一覧取得 ▼▼▼
             case 'getRoomList': {
                 const publicRooms = [];
                 rooms.forEach((room, id) => {
@@ -315,50 +310,59 @@ wss.on('connection', (ws) => {
                 break;
             }
             
-            // ▼▼▼ 修正: 無効試合（Draw）のロジック ▼▼▼
-            case 'offerDraw': {
-                if (!room || room.gameState !== 'IN_GAME') return;
-                const opponent = (ws === room.playerO) ? room.playerX : room.playerO;
-                if (opponent) {
-                    opponent.send(JSON.stringify({ type: 'drawOffered' }));
-                }
-                break;
-            }
-            
-            case 'acceptDraw': {
-                if (!room || room.gameState !== 'IN_GAME') break;
-                console.log(`[${ws.roomId}] 合意DRAW成立`);
-                room.gameState = 'POST_GAME';
-                broadcast(room, { type: 'gameDrawnByAgreement' });
-                resetReadyStates(room);
-                break;
-            }
-            // ▲▲▲ 修正ここまで ▲▲▲
-            
-            case 'readyForLobby': {
-                if (!room || room.gameState !== 'POST_GAME') return;
-                if (playerInfo) playerInfo.isReadyForLobby = true;
-                
-                let allReady = true;
-                room.players.forEach(p => {
-                    if (!p.isReadyForLobby) allReady = false;
-                });
+            // ▼▼▼ 修正: 「降参」機能 ▼▼▼
+            case 'surrender': {
+                if (!room || room.gameState !== 'IN_GAME' || !playerInfo) return;
 
-                if (allReady) {
-                    console.log(`[${ws.roomId}] 全員ロビーに戻る`);
-                    room.gameState = 'LOBBY';
-                    room.playerO = null;
-                    room.playerX = null;
-                    resetReadyStates(room);
-                    
-                    room.players.forEach(p => p.mark = 'SPECTATOR');
-                    
-                    broadcast(room, { 
-                        type: 'returnToLobby',
-                        lobby: getLobbyState(room),
-                        roomId: ws.roomId
-                    });
+                let winnerMark = 'DRAW';
+                if (ws === room.playerO) {
+                    winnerMark = 'X'; // Oが降参したのでXの勝ち
+                } else if (ws === room.playerX) {
+                    winnerMark = 'O'; // Xが降参したのでOの勝ち
                 }
+
+                if (winnerMark !== 'DRAW') {
+                    room.gameState = 'POST_GAME';
+                    console.log(`[${ws.roomId}] ${playerInfo.username} が降参。${winnerMark} の勝利。`);
+                    broadcast(room, { type: 'gameOver', result: winnerMark });
+                    resetReadyStates(room);
+                }
+                break;
+            }
+            
+            // ▼▼▼ 修正: 削除 (不要になったため) ▼▼▼
+            // case 'offerDraw':
+            // case 'acceptDraw': 
+            
+            // ▼▼▼ 修正: 「ロビーに戻る」機能 ▼▼▼
+            case 'returnToLobby': {
+                if (!room || !playerInfo) return; 
+                
+                // プレイヤーだった場合はスロットから抜ける
+                if (ws === room.playerO) {
+                    room.playerO = null;
+                }
+                if (ws === room.playerX) {
+                    room.playerX = null;
+                }
+                playerInfo.mark = 'SPECTATOR';
+
+                // 試合後の両者がロビーに戻ったら、部屋のステータスをロビーに戻す
+                if (room.gameState === 'POST_GAME' && !room.playerO && !room.playerX) {
+                    room.gameState = 'LOBBY';
+                    console.log(`[${ws.roomId}] 両者がロビーに戻りました。`);
+                }
+
+                // 送信者自身に最新のロビー状態を送る
+                ws.send(JSON.stringify({ 
+                    type: 'lobbyUpdate',
+                    lobby: getLobbyState(room)
+                }));
+                // 他の全員にも最新のロビー状態をブロードキャスト
+                broadcast(room, { 
+                    type: 'lobbyUpdate',
+                    lobby: getLobbyState(room)
+                }, ws);
                 break;
             }
         }

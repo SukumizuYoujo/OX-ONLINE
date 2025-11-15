@@ -124,7 +124,7 @@ wss.on('connection', (ws) => {
                     ws.send(JSON.stringify({ type: 'error', message: 'ルームが見つかりません。' })); return;
                 }
                 
-                // ▼▼▼ 修正: 満員チェック ▼▼▼
+                // ▼▼▼ 満員チェック ▼▼▼
                 if (joinedRoom.players.size >= joinedRoom.maxPlayers) {
                     ws.send(JSON.stringify({ type: 'error', message: 'ルームは満員です。' })); return;
                 }
@@ -155,7 +155,7 @@ wss.on('connection', (ws) => {
             case 'updateSettings': {
                 if (room && room.host === ws) {
                     room.settings = { ...room.settings, ...(data.settings || {}) };
-                    // ▼▼▼ 修正: 人数と公開設定も更新 ▼▼▼
+                    // ▼▼▼ 人数と公開設定も更新 ▼▼▼
                     room.settings.maxPlayers = Math.max(2, Math.min(100, room.settings.maxPlayers || 10));
                     room.maxPlayers = room.settings.maxPlayers;
                     // room.isPublic = room.settings.isPublic; // (公開設定は作成時のみ)
@@ -170,7 +170,7 @@ wss.on('connection', (ws) => {
                 break;
             }
 
-            // ▼▼▼ 新規: ルーム一覧取得 ▼▼▼
+            // ▼▼▼ ルーム一覧取得 ▼▼▼
             case 'getRoomList': {
                 const publicRooms = [];
                 rooms.forEach((room, id) => {
@@ -315,7 +315,7 @@ wss.on('connection', (ws) => {
                 break;
             }
             
-            // ▼▼▼ 修正: 無効試合（Draw）のロジックを追加 ▼▼▼
+            // ▼▼▼ 修正: 無効試合（Draw）のロジック ▼▼▼
             case 'offerDraw': {
                 if (!room || room.gameState !== 'IN_GAME') return;
                 const opponent = (ws === room.playerO) ? room.playerX : room.playerO;
@@ -333,6 +333,7 @@ wss.on('connection', (ws) => {
                 resetReadyStates(room);
                 break;
             }
+            // ▲▲▲ 修正ここまで ▲▲▲
             
             case 'readyForLobby': {
                 if (!room || room.gameState !== 'POST_GAME') return;

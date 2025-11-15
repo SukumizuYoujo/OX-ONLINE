@@ -1,4 +1,4 @@
-// Render サーバーコード (v8.2: ホスト移譲の通知機能を追加)
+// Render サーバーコード (v8.3: 公開ルーム, 最大人数, 無効試合 対応)
 const WebSocket = require('ws');
 
 const port = process.env.PORT || 8080;
@@ -59,7 +59,9 @@ const defaultSettings = {
     boardSize: 3,
     playerOrder: 'random',
     limitMode: false,
-    highlightOldest: false
+    highlightOldest: false,
+    isPublic: true, // 新規
+    maxPlayers: 10  // 新規
 };
 
 // === 接続処理 ===
@@ -81,15 +83,21 @@ wss.on('connection', (ws) => {
                 do { roomId = generateRoomId(); } while (rooms.has(roomId));
                 
                 const settings = { ...defaultSettings, ...(data.settings || {}) };
+                // 人数バリデーション
+                settings.maxPlayers = Math.max(2, Math.min(100, settings.maxPlayers || 10));
+                
                 const username = data.username || `User${Math.floor(Math.random() * 1000)}`;
                 
                 const newRoom = {
+                    id: roomId, // 新規 (ルーム一覧用)
                     settings: settings,
                     players: new Map(),
                     playerO: null,
                     playerX: null,
                     gameState: 'LOBBY',
                     host: ws,
+                    isPublic: settings.isPublic, // 新規
+                    maxPlayers: settings.maxPlayers // 新規
                 };
                 
                 newRoom.players.set(ws, { username: username, mark: 'SPECTATOR' });
@@ -116,12 +124,17 @@ wss.on('connection', (ws) => {
                     ws.send(JSON.stringify({ type: 'error', message: 'ルームが見つかりません。' })); return;
                 }
                 
+                // ▼▼▼ 修正: 満員チェック ▼▼▼
+                if (joinedRoom.players.size >= joinedRoom.maxPlayers) {
+                    ws.send(JSON.stringify({ type: 'error', message: 'ルームは満員です。' })); return;
+                }
+                
                 joinedRoom.players.set(ws, { username: username, mark: 'SPECTATOR' });
                 ws.roomId = roomId;
 
                 ws.send(JSON.stringify({ 
                     type: 'roomJoined', 
-                    isHost: false,
+                    isHost: (joinedRoom.host === ws), // 自分がホストか
                     mark: 'SPECTATOR',
                     lobby: getLobbyState(joinedRoom),
                     roomId: roomId
@@ -142,6 +155,11 @@ wss.on('connection', (ws) => {
             case 'updateSettings': {
                 if (room && room.host === ws) {
                     room.settings = { ...room.settings, ...(data.settings || {}) };
+                    // ▼▼▼ 修正: 人数と公開設定も更新 ▼▼▼
+                    room.settings.maxPlayers = Math.max(2, Math.min(100, room.settings.maxPlayers || 10));
+                    room.maxPlayers = room.settings.maxPlayers;
+                    // room.isPublic = room.settings.isPublic; // (公開設定は作成時のみ)
+                    
                     console.log(`[${ws.roomId}] 設定が更新されました。`);
                     
                     broadcast(room, { 
@@ -149,6 +167,35 @@ wss.on('connection', (ws) => {
                         settings: room.settings 
                     }, ws);
                 }
+                break;
+            }
+
+            // ▼▼▼ 新規: ルーム一覧取得 ▼▼▼
+            case 'getRoomList': {
+                const publicRooms = [];
+                rooms.forEach((room, id) => {
+                    if (room.isPublic && room.players.size < room.maxPlayers) {
+                        publicRooms.push({
+                            id: room.id,
+                            count: room.players.size,
+                            max: room.maxPlayers,
+                            inGame: room.gameState !== 'LOBBY'
+                        });
+                    }
+                });
+
+                const page = data.page || 1;
+                const limit = 5;
+                const totalPages = Math.ceil(publicRooms.length / limit) || 1;
+                const startIndex = (page - 1) * limit;
+                const paginatedRooms = publicRooms.slice(startIndex, startIndex + limit);
+
+                ws.send(JSON.stringify({
+                    type: 'roomListUpdate',
+                    rooms: paginatedRooms,
+                    page: page,
+                    totalPages: totalPages
+                }));
                 break;
             }
             
@@ -268,7 +315,7 @@ wss.on('connection', (ws) => {
                 break;
             }
             
-            // ▼▼▼ 修正: この機能がサーバーにあるか確認してください ▼▼▼
+            // ▼▼▼ 修正: 無効試合（Draw）のロジックを追加 ▼▼▼
             case 'offerDraw': {
                 if (!room || room.gameState !== 'IN_GAME') return;
                 const opponent = (ws === room.playerO) ? room.playerX : room.playerO;
@@ -278,7 +325,6 @@ wss.on('connection', (ws) => {
                 break;
             }
             
-            // ▼▼▼ 修正: この機能がサーバーにあるか確認してください ▼▼▼
             case 'acceptDraw': {
                 if (!room || room.gameState !== 'IN_GAME') break;
                 console.log(`[${ws.roomId}] 合意DRAW成立`);

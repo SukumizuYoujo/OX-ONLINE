@@ -233,6 +233,7 @@ wss.on('connection', (ws) => {
                 }
                 
                 playerInfo.mark = 'SPECTATOR';
+                playerInfo.isReadyForMatch = false; // 準備状態もリセット
                 ws.send(JSON.stringify({ type: 'youLeftSlot', lobby: getLobbyState(room) }));
                 broadcast(room, { type: 'lobbyUpdate', lobby: getLobbyState(room) }, ws);
                 break;
@@ -252,6 +253,14 @@ wss.on('connection', (ws) => {
             // ▼▼▼ 修正: 準備完了トグル ▼▼▼
             case 'setReady': {
                 if (!room || !playerInfo) return;
+                
+                // スロットに入っていない人は準備完了できない
+                if (room.playerO !== ws && room.playerX !== ws) {
+                    playerInfo.isReadyForMatch = false;
+                    ws.send(JSON.stringify({ type: 'error', message: 'スロットに入ってください。' }));
+                    return;
+                }
+                
                 playerInfo.isReadyForMatch = data.isReady;
                 console.log(`[${ws.roomId}] ${playerInfo.username} is ${data.isReady ? 'READY' : 'NOT READY'}`);
                 
@@ -372,7 +381,7 @@ wss.on('connection', (ws) => {
                 break;
             }
 
-            // ▼▼▼ 修正: キック機能（スロットから除外） ▼▼▼
+            // ▼▼▼ 修正: キック機能（スロット除外 ＆ 観戦者キック） ▼▼▼
             case 'kickPlayer': {
                 if (!room || !playerInfo || room.host !== ws) return; // ホストのみ
                 

@@ -227,16 +227,16 @@ wss.on('connection', (ws) => {
                     room.playerO = oPlayer;
                     room.playerX = xPlayer;
                     
-                    // 全員にマークを通知
                     room.players.forEach((p, w) => {
-                        if (w === oPlayer) p.mark = 'O';
-                        else if (w === xPlayer) p.mark = 'X';
-                        else p.mark = 'SPECTATOR';
+                        let mark = 'SPECTATOR';
+                        if (w === oPlayer) mark = 'O';
+                        else if (w === xPlayer) mark = 'X';
+                        p.mark = mark;
                         
                         w.send(JSON.stringify({ 
                             type: 'matchStarting', 
                             firstPlayer: 'O',
-                            myMark: p.mark // あなたのマークを通知
+                            myMark: mark
                         }));
                     });
                 }

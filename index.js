@@ -226,14 +226,19 @@ wss.on('connection', (ws) => {
                     
                     room.playerO = oPlayer;
                     room.playerX = xPlayer;
-                    room.players.get(oPlayer).mark = 'O';
-                    room.players.get(xPlayer).mark = 'X';
                     
+                    // 全員にマークを通知
                     room.players.forEach((p, w) => {
-                       if (w !== oPlayer && w !== xPlayer) p.mark = 'SPECTATOR';
+                        if (w === oPlayer) p.mark = 'O';
+                        else if (w === xPlayer) p.mark = 'X';
+                        else p.mark = 'SPECTATOR';
+                        
+                        w.send(JSON.stringify({ 
+                            type: 'matchStarting', 
+                            firstPlayer: 'O',
+                            myMark: p.mark // あなたのマークを通知
+                        }));
                     });
-                    
-                    broadcast(room, { type: 'matchStarting', firstPlayer: 'O' });
                 }
                 break;
             }
@@ -260,7 +265,6 @@ wss.on('connection', (ws) => {
                 break;
             }
             
-            // ▼▼▼ 変更: 「無効試合 投票」 ▼▼▼
             case 'offerDraw': {
                 const opponent = (ws === room.playerO) ? room.playerX : room.playerO;
                 if (opponent) {
@@ -269,7 +273,6 @@ wss.on('connection', (ws) => {
                 break;
             }
             
-            // ▼▼▼ 変更: 「無効試合 受諾」 ▼▼▼
             case 'acceptDraw': {
                 if (!room || room.gameState !== 'IN_GAME') break;
                 console.log(`[${ws.roomId}] 合意DRAW成立`);
@@ -331,13 +334,11 @@ wss.on('connection', (ws) => {
                 rooms.delete(ws.roomId);
                 console.log(`[${ws.roomId}] 最後のユーザーが退出。ルーム削除。`);
             } else {
-                // ホストの移譲
                 if (room.host === ws) {
-                    room.host = room.players.keys().next().value; // 次の人をホストに
+                    room.host = room.players.keys().next().value;
                     const newHostInfo = room.players.get(room.host);
                     console.log(`[${ws.roomId}] ホストが ${newHostInfo.username} に移譲されました。`);
                     
-                    // 新ホストにロビー更新(設定ボタン表示のため)と通知
                     if(room.host.readyState === WebSocket.OPEN) {
                         room.host.send(JSON.stringify({ type: 'lobbyUpdate', lobby: getLobbyState(room) }));
                         room.host.send(JSON.stringify({
@@ -349,7 +350,6 @@ wss.on('connection', (ws) => {
                     }
                 }
                 
-                // 試合中の対戦相手が切断
                 if (room.gameState === 'IN_GAME' && wasPlayer) {
                     room.gameState = 'LOBBY';
                     room.playerO = null;
@@ -366,18 +366,17 @@ wss.on('connection', (ws) => {
                         isNotification: true
                     });
                 } else {
-                    // それ以外の退出
                     broadcast(room, { 
                         type: 'lobbyUpdate', 
                         lobby: getLobbyState(room)
                     });
-                    broadcast(room, {
-                        type: 'newChat',
-                        from: 'システム',
-                        message: `${username} が退出しました。`,
-                        isNotification: true
-                    });
                 }
+                broadcast(room, {
+                    type: 'newChat',
+                    from: 'システム',
+                    message: `${username} が退出しました。`,
+                    isNotification: true
+                });
             }
         }
     });

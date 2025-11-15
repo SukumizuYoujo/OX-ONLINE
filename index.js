@@ -268,7 +268,6 @@ wss.on('connection', (ws) => {
                 break;
             }
             
-            // ▼▼▼ 修正: この機能がサーバーにあるか確認してください ▼▼▼
             case 'offerDraw': {
                 const opponent = (ws === room.playerO) ? room.playerX : room.playerO;
                 if (opponent) {
@@ -277,7 +276,6 @@ wss.on('connection', (ws) => {
                 break;
             }
             
-            // ▼▼▼ 修正: この機能がサーバーにあるか確認してください ▼▼▼
             case 'acceptDraw': {
                 if (!room || room.gameState !== 'IN_GAME') break;
                 console.log(`[${ws.roomId}] 合意DRAW成立`);

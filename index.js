@@ -1,4 +1,4 @@
-// Render サーバーコード (v9.5: 降参・ロビー即時帰還・キック・準備トグル 対応)
+// Render サーバーコード (v9.5: 降参・ロビー即時帰還・スロット除外・準備トグル 対応)
 const WebSocket = require('ws');
 
 const port = process.env.PORT || 8080;
@@ -99,7 +99,7 @@ wss.on('connection', (ws) => {
                     maxPlayers: settings.maxPlayers 
                 };
                 
-                newRoom.players.set(ws, { username: username, mark: 'SPECTATOR' });
+                newRoom.players.set(ws, { username: username, mark: 'SPECTATOR', slotCooldownUntil: 0 });
                 rooms.set(roomId, newRoom);
                 ws.roomId = roomId;
 
@@ -127,7 +127,7 @@ wss.on('connection', (ws) => {
                     ws.send(JSON.stringify({ type: 'error', message: 'ルームは満員です。' })); return;
                 }
                 
-                joinedRoom.players.set(ws, { username: username, mark: 'SPECTATOR' });
+                joinedRoom.players.set(ws, { username: username, mark: 'SPECTATOR', slotCooldownUntil: 0 });
                 ws.roomId = roomId;
 
                 ws.send(JSON.stringify({ 
@@ -197,6 +197,13 @@ wss.on('connection', (ws) => {
             case 'takeSlot': {
                 if (!room || room.gameState !== 'LOBBY' || !playerInfo) return;
                 if (room.playerO === ws || room.playerX === ws) return;
+
+                // ▼▼▼ 修正: クールダウンチェック ▼▼▼
+                if (playerInfo.slotCooldownUntil && Date.now() < playerInfo.slotCooldownUntil) {
+                    const remaining = Math.ceil((playerInfo.slotCooldownUntil - Date.now()) / 1000);
+                    ws.send(JSON.stringify({ type: 'error', message: `除外されたため、あと${remaining}秒間スロットに参加できません。` }));
+                    return;
+                }
 
                 if (data.slot === 'O' && !room.playerO) {
                     room.playerO = ws;
@@ -349,6 +356,7 @@ wss.on('connection', (ws) => {
                     room.playerX = null;
                 }
                 playerInfo.mark = 'SPECTATOR';
+                playerInfo.isReadyForMatch = false;
 
                 // 試合後の両者がロビーに戻ったら、部屋のステータスをロビーに戻す
                 if (room.gameState === 'POST_GAME' && !room.playerO && !room.playerX) {
@@ -364,24 +372,53 @@ wss.on('connection', (ws) => {
                 break;
             }
 
-            // ▼▼▼ 新規: キック機能 ▼▼▼
+            // ▼▼▼ 修正: キック機能（スロットから除外） ▼▼▼
             case 'kickPlayer': {
                 if (!room || !playerInfo || room.host !== ws) return; // ホストのみ
                 
                 const usernameToKick = data.username;
                 let kickedWs = null;
+                let kickedPlayerInfo = null;
                 
                 room.players.forEach((p, w) => {
                     if (p.username === usernameToKick) {
                         kickedWs = w;
+                        kickedPlayerInfo = p;
                     }
                 });
                 
                 if (kickedWs) {
-                    console.log(`[${ws.roomId}] ${playerInfo.username} が ${usernameToKick} をキックしました。`);
-                    // 強制的に切断させ、on('close')イベントを発火させる
-                    kickedWs.send(JSON.stringify({ type: 'error', message: 'ホストによってルームからキックされました。' }));
-                    kickedWs.close();
+                    let wasInSlot = false;
+                    if (room.playerO === kickedWs) {
+                        room.playerO = null;
+                        wasInSlot = true;
+                    } else if (room.playerX === kickedWs) {
+                        room.playerX = null;
+                        wasInSlot = true;
+                    }
+
+                    if (wasInSlot) {
+                        // スロットから除外
+                        kickedPlayerInfo.mark = 'SPECTATOR';
+                        kickedPlayerInfo.isReadyForMatch = false;
+                        kickedPlayerInfo.slotCooldownUntil = Date.now() + 10000; // 10秒のクールダウン
+                        
+                        console.log(`[${ws.roomId}] ${playerInfo.username} が ${usernameToKick} をスロットから除外しました。`);
+                        
+                        broadcast(room, {
+                            type: 'newChat',
+                            from: 'システム',
+                            message: `${usernameToKick} がホストによってスロットから除外されました。`,
+                            isNotification: true
+                        });
+                        broadcast(room, { type: 'lobbyUpdate', lobby: getLobbyState(room) });
+                    
+                    } else if (kickedWs !== room.host) {
+                        // 観戦者をキック（ルームから除外）
+                        console.log(`[${ws.roomId}] ${playerInfo.username} が ${usernameToKick} をキックしました。`);
+                        kickedWs.send(JSON.stringify({ type: 'error', message: 'ホストによってルームからキックされました。' }));
+                        kickedWs.close(); // 観戦者は強制切断
+                    }
                 }
                 break;
             }
@@ -430,9 +467,8 @@ wss.on('connection', (ws) => {
                 
                 const lobbyState = getLobbyState(room);
                 
-                // 試合中にプレイヤーが切断した場合
                 if (room.gameState === 'IN_GAME' && wasPlayer) {
-                    room.gameState = 'LOBBY'; // 強制的にロビーに戻す
+                    room.gameState = 'LOBBY';
                     room.playerO = null;
                     room.playerX = null;
                     broadcast(room, {
@@ -448,7 +484,6 @@ wss.on('connection', (ws) => {
                         isNotification: true
                     });
                 } else {
-                    // ロビーか試合後に観戦者が退出した場合
                     broadcast(room, { 
                         type: 'lobbyUpdate', 
                         lobby: lobbyState,

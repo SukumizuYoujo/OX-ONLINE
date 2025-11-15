@@ -1,4 +1,4 @@
-// Render サーバーコード (v8.4: 降参・ロビー即時帰還 対応)
+// Render サーバーコード (v9.5: 降参・ロビー即時帰還・キック・準備トグル 対応)
 const WebSocket = require('ws');
 
 const port = process.env.PORT || 8080;
@@ -242,18 +242,25 @@ wss.on('connection', (ws) => {
                 break;
             }
 
-            case 'readyForMatch': {
-                if (!room || !playerInfo || !room.playerO || !room.playerX) return;
+            // ▼▼▼ 修正: 準備完了トグル ▼▼▼
+            case 'setReady': {
+                if (!room || !playerInfo) return;
+                playerInfo.isReadyForMatch = data.isReady;
+                console.log(`[${ws.roomId}] ${playerInfo.username} is ${data.isReady ? 'READY' : 'NOT READY'}`);
                 
-                playerInfo.isReadyForMatch = true;
+                // 相手にも準備状態を伝える
+                broadcast(room, { type: 'lobbyUpdate', lobby: getLobbyState(room) });
                 
-                const opponent = (ws === room.playerO) ? room.playerX : room.playerO;
-                const opponentInfo = opponent ? room.players.get(opponent) : null;
+                if (!room.playerO || !room.playerX) return; // 2人揃ってない
+                
+                const playerOInfo = room.players.get(room.playerO);
+                const playerXInfo = room.players.get(room.playerX);
 
-                if (opponentInfo && opponentInfo.isReadyForMatch) {
+                // 両者準備完了なら試合開始
+                if (playerOInfo && playerXInfo && playerOInfo.isReadyForMatch && playerXInfo.isReadyForMatch) {
                     console.log(`[${ws.roomId}] 試合開始`);
                     room.gameState = 'IN_GAME';
-                    resetReadyStates(room);
+                    resetReadyStates(room); // isReadyForMatch を false にリセット
                     
                     const order = room.settings.playerOrder;
                     const hostWs = room.host;
@@ -330,10 +337,6 @@ wss.on('connection', (ws) => {
                 break;
             }
             
-            // ▼▼▼ 修正: 削除 (不要になったため) ▼▼▼
-            // case 'offerDraw':
-            // case 'acceptDraw': 
-            
             // ▼▼▼ 修正: 「ロビーに戻る」機能 ▼▼▼
             case 'returnToLobby': {
                 if (!room || !playerInfo) return; 
@@ -353,16 +356,33 @@ wss.on('connection', (ws) => {
                     console.log(`[${ws.roomId}] 両者がロビーに戻りました。`);
                 }
 
-                // 送信者自身に最新のロビー状態を送る
-                ws.send(JSON.stringify({ 
-                    type: 'lobbyUpdate',
-                    lobby: getLobbyState(room)
-                }));
-                // 他の全員にも最新のロビー状態をブロードキャスト
+                // 全員に最新のロビー状態をブロードキャスト
                 broadcast(room, { 
                     type: 'lobbyUpdate',
                     lobby: getLobbyState(room)
-                }, ws);
+                });
+                break;
+            }
+
+            // ▼▼▼ 新規: キック機能 ▼▼▼
+            case 'kickPlayer': {
+                if (!room || !playerInfo || room.host !== ws) return; // ホストのみ
+                
+                const usernameToKick = data.username;
+                let kickedWs = null;
+                
+                room.players.forEach((p, w) => {
+                    if (p.username === usernameToKick) {
+                        kickedWs = w;
+                    }
+                });
+                
+                if (kickedWs) {
+                    console.log(`[${ws.roomId}] ${playerInfo.username} が ${usernameToKick} をキックしました。`);
+                    // 強制的に切断させ、on('close')イベントを発火させる
+                    kickedWs.send(JSON.stringify({ type: 'error', message: 'ホストによってルームからキックされました。' }));
+                    kickedWs.close();
+                }
                 break;
             }
         }
@@ -410,8 +430,9 @@ wss.on('connection', (ws) => {
                 
                 const lobbyState = getLobbyState(room);
                 
+                // 試合中にプレイヤーが切断した場合
                 if (room.gameState === 'IN_GAME' && wasPlayer) {
-                    room.gameState = 'LOBBY';
+                    room.gameState = 'LOBBY'; // 強制的にロビーに戻す
                     room.playerO = null;
                     room.playerX = null;
                     broadcast(room, {
@@ -427,6 +448,7 @@ wss.on('connection', (ws) => {
                         isNotification: true
                     });
                 } else {
+                    // ロビーか試合後に観戦者が退出した場合
                     broadcast(room, { 
                         type: 'lobbyUpdate', 
                         lobby: lobbyState,

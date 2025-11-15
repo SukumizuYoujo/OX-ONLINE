@@ -1,4 +1,4 @@
-// Render サーバーコード (v8.1: 多人数ロビー, 観戦, チャット, 無効試合DRAW 対応)
+// Render サーバーコード (v8.2: ホスト移譲の通知機能を追加)
 const WebSocket = require('ws');
 
 const port = process.env.PORT || 8080;
@@ -36,12 +36,15 @@ function getLobbyState(room) {
             spectators.push(playerInfo);
         }
     });
+    
+    const hostInfo = room.host ? room.players.get(room.host) : null;
 
     return {
         settings: room.settings,
         playerO: playerO_Info,
         playerX: playerX_Info,
-        spectators: spectators
+        spectators: spectators,
+        hostUsername: hostInfo ? hostInfo.username : ''
     };
 }
 
@@ -265,6 +268,7 @@ wss.on('connection', (ws) => {
                 break;
             }
             
+            // ▼▼▼ 修正: この機能がサーバーにあるか確認してください ▼▼▼
             case 'offerDraw': {
                 const opponent = (ws === room.playerO) ? room.playerX : room.playerO;
                 if (opponent) {
@@ -273,6 +277,7 @@ wss.on('connection', (ws) => {
                 break;
             }
             
+            // ▼▼▼ 修正: この機能がサーバーにあるか確認してください ▼▼▼
             case 'acceptDraw': {
                 if (!room || room.gameState !== 'IN_GAME') break;
                 console.log(`[${ws.roomId}] 合意DRAW成立`);
@@ -334,13 +339,14 @@ wss.on('connection', (ws) => {
                 rooms.delete(ws.roomId);
                 console.log(`[${ws.roomId}] 最後のユーザーが退出。ルーム削除。`);
             } else {
+                let newHostUsername = null;
                 if (room.host === ws) {
                     room.host = room.players.keys().next().value;
                     const newHostInfo = room.players.get(room.host);
-                    console.log(`[${ws.roomId}] ホストが ${newHostInfo.username} に移譲されました。`);
+                    newHostUsername = newHostInfo.username;
+                    console.log(`[${ws.roomId}] ホストが ${newHostUsername} に移譲されました。`);
                     
                     if(room.host.readyState === WebSocket.OPEN) {
-                        room.host.send(JSON.stringify({ type: 'lobbyUpdate', lobby: getLobbyState(room) }));
                         room.host.send(JSON.stringify({
                             type: 'newChat',
                             from: 'システム',
@@ -350,14 +356,17 @@ wss.on('connection', (ws) => {
                     }
                 }
                 
+                const lobbyState = getLobbyState(room);
+                
                 if (room.gameState === 'IN_GAME' && wasPlayer) {
                     room.gameState = 'LOBBY';
                     room.playerO = null;
                     room.playerX = null;
                     broadcast(room, {
                         type: 'opponentDisconnected',
-                        lobby: getLobbyState(room),
-                        roomId: ws.roomId
+                        lobby: lobbyState,
+                        roomId: ws.roomId,
+                        newHostUsername: newHostUsername
                     });
                     broadcast(room, {
                         type: 'newChat',
@@ -368,7 +377,8 @@ wss.on('connection', (ws) => {
                 } else {
                     broadcast(room, { 
                         type: 'lobbyUpdate', 
-                        lobby: getLobbyState(room)
+                        lobby: lobbyState,
+                        newHostUsername: newHostUsername
                     });
                 }
                 broadcast(room, {

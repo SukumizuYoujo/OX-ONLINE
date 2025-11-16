@@ -1,4 +1,4 @@
-// Render サーバーコード (v9.5: 降参・ロビー即時帰還・スロット除外・準備トグル 対応)
+// Render サーバーコード (v10.0: ゲーム切替基盤、オセロスタブ追加)
 const WebSocket = require('ws');
 
 const port = process.env.PORT || 8080;
@@ -51,17 +51,23 @@ function getLobbyState(room) {
 function resetReadyStates(room) {
     room.players.forEach(playerInfo => {
         playerInfo.isReadyForMatch = false;
-        // playerInfo.isReadyForLobby = false; // 廃止
     });
 }
 
-const defaultSettings = {
+// 〇×ゲームのデフォルト設定
+const ticTacToeSettings = {
     boardSize: 3,
     playerOrder: 'random',
     limitMode: false,
     highlightOldest: false,
-    isPublic: true, 
-    maxPlayers: 10
+};
+
+// オセロのデフォルト設定
+const othelloSettings = {
+    boardSize: 8, // オセロは8x8固定
+    playerOrder: 'host_o', // 黒(O)が先手固定
+    limitMode: false,
+    highlightOldest: false,
 };
 
 // === 接続処理 ===
@@ -82,8 +88,16 @@ wss.on('connection', (ws) => {
                 let roomId;
                 do { roomId = generateRoomId(); } while (rooms.has(roomId));
                 
-                const settings = { ...defaultSettings, ...(data.settings || {}) };
-                settings.maxPlayers = Math.max(2, Math.min(100, settings.maxPlayers || 10));
+                // ▼▼▼ 修正: ゲームタイプに応じて設定を読み込む ▼▼▼
+                const gameType = data.gameType === 'othello' ? 'othello' : 'tictactoe';
+                const defaultSettings = (gameType === 'othello') ? othelloSettings : ticTacToeSettings;
+                
+                const settings = { 
+                    ...defaultSettings, 
+                    ...(data.settings || {}),
+                    isPublic: data.settings.isPublic ?? true,
+                    maxPlayers: Math.max(2, Math.min(100, data.settings.maxPlayers || 10))
+                };
                 
                 const username = data.username || `User${Math.floor(Math.random() * 1000)}`;
                 
@@ -96,10 +110,11 @@ wss.on('connection', (ws) => {
                     gameState: 'LOBBY',
                     host: ws,
                     isPublic: settings.isPublic, 
-                    maxPlayers: settings.maxPlayers 
+                    maxPlayers: settings.maxPlayers,
+                    gameType: gameType // ▼▼▼ 新規: ゲームタイプ ▼▼▼
                 };
                 
-                newRoom.players.set(ws, { username: username, mark: 'SPECTATOR', slotCooldownUntil: 0 }); // クールダウン用
+                newRoom.players.set(ws, { username: username, mark: 'SPECTATOR', slotCooldownUntil: 0 });
                 rooms.set(roomId, newRoom);
                 ws.roomId = roomId;
 
@@ -108,9 +123,10 @@ wss.on('connection', (ws) => {
                     isHost: true,
                     mark: 'SPECTATOR',
                     lobby: getLobbyState(newRoom),
-                    roomId: roomId
+                    roomId: roomId,
+                    gameType: newRoom.gameType // ▼▼▼ 新規 ▼▼▼
                 }));
-                console.log(`[${roomId}] ${username} がルームを作成しました。`);
+                console.log(`[${roomId}] ${username} が ${gameType} ルームを作成しました。`);
                 break;
             }
             
@@ -127,7 +143,7 @@ wss.on('connection', (ws) => {
                     ws.send(JSON.stringify({ type: 'error', message: 'ルームは満員です。' })); return;
                 }
                 
-                joinedRoom.players.set(ws, { username: username, mark: 'SPECTATOR', slotCooldownUntil: 0 }); // クールダウン用
+                joinedRoom.players.set(ws, { username: username, mark: 'SPECTATOR', slotCooldownUntil: 0 });
                 ws.roomId = roomId;
 
                 ws.send(JSON.stringify({ 
@@ -135,7 +151,8 @@ wss.on('connection', (ws) => {
                     isHost: (joinedRoom.host === ws),
                     mark: 'SPECTATOR',
                     lobby: getLobbyState(joinedRoom),
-                    roomId: roomId
+                    roomId: roomId,
+                    gameType: joinedRoom.gameType // ▼▼▼ 新規 ▼▼▼
                 }));
                 
                 broadcast(joinedRoom, { type: 'lobbyUpdate', lobby: getLobbyState(joinedRoom) }, ws);
@@ -152,9 +169,12 @@ wss.on('connection', (ws) => {
 
             case 'updateSettings': {
                 if (room && room.host === ws) {
-                    room.settings = { ...room.settings, ...(data.settings || {}) };
-                    room.settings.maxPlayers = Math.max(2, Math.min(100, room.settings.maxPlayers || 10));
-                    room.maxPlayers = room.settings.maxPlayers;
+                    // 〇×ゲームの設定のみ更新（オセロは未対応）
+                    if (room.gameType === 'tictactoe') {
+                         room.settings = { ...room.settings, ...(data.settings || {}) };
+                         room.settings.maxPlayers = Math.max(2, Math.min(100, room.settings.maxPlayers || 10));
+                         room.maxPlayers = room.settings.maxPlayers;
+                    }
                     
                     console.log(`[${ws.roomId}] 設定が更新されました。`);
                     
@@ -174,7 +194,8 @@ wss.on('connection', (ws) => {
                             id: room.id,
                             count: room.players.size,
                             max: room.maxPlayers,
-                            inGame: room.gameState !== 'LOBBY'
+                            inGame: room.gameState !== 'LOBBY',
+                            gameType: room.gameType // ▼▼▼ 新規 ▼▼▼
                         });
                     }
                 });
@@ -198,7 +219,6 @@ wss.on('connection', (ws) => {
                 if (!room || room.gameState !== 'LOBBY' || !playerInfo) return;
                 if (room.playerO === ws || room.playerX === ws) return;
 
-                // ▼▼▼ 修正: クールダウンチェック ▼▼▼
                 if (playerInfo.slotCooldownUntil && Date.now() < playerInfo.slotCooldownUntil) {
                     const remaining = Math.ceil((playerInfo.slotCooldownUntil - Date.now()) / 1000);
                     ws.send(JSON.stringify({ type: 'error', message: `除外されたため、あと${remaining}秒間スロットに参加できません。` }));
@@ -233,7 +253,7 @@ wss.on('connection', (ws) => {
                 }
                 
                 playerInfo.mark = 'SPECTATOR';
-                playerInfo.isReadyForMatch = false; // 準備状態もリセット
+                playerInfo.isReadyForMatch = false; 
                 ws.send(JSON.stringify({ type: 'youLeftSlot', lobby: getLobbyState(room) }));
                 broadcast(room, { type: 'lobbyUpdate', lobby: getLobbyState(room) }, ws);
                 break;
@@ -250,11 +270,9 @@ wss.on('connection', (ws) => {
                 break;
             }
 
-            // ▼▼▼ 修正: 準備完了トグル ▼▼▼
             case 'setReady': {
                 if (!room || !playerInfo) return;
                 
-                // スロットに入っていない人は準備完了できない
                 if (room.playerO !== ws && room.playerX !== ws) {
                     playerInfo.isReadyForMatch = false;
                     ws.send(JSON.stringify({ type: 'error', message: 'スロットに入ってください。' }));
@@ -264,32 +282,37 @@ wss.on('connection', (ws) => {
                 playerInfo.isReadyForMatch = data.isReady;
                 console.log(`[${ws.roomId}] ${playerInfo.username} is ${data.isReady ? 'READY' : 'NOT READY'}`);
                 
-                // 相手にも準備状態を伝える
                 broadcast(room, { type: 'lobbyUpdate', lobby: getLobbyState(room) });
                 
-                if (!room.playerO || !room.playerX) return; // 2人揃ってない
+                if (!room.playerO || !room.playerX) return;
                 
                 const playerOInfo = room.players.get(room.playerO);
                 const playerXInfo = room.players.get(room.playerX);
 
-                // 両者準備完了なら試合開始
                 if (playerOInfo && playerXInfo && playerOInfo.isReadyForMatch && playerXInfo.isReadyForMatch) {
-                    console.log(`[${ws.roomId}] 試合開始`);
+                    console.log(`[${ws.roomId}] 試合開始 (${room.gameType})`);
                     room.gameState = 'IN_GAME';
-                    resetReadyStates(room); // isReadyForMatch を false にリセット
-                    
-                    const order = room.settings.playerOrder;
-                    const hostWs = room.host;
+                    resetReadyStates(room);
                     
                     let oPlayer = room.playerO;
                     let xPlayer = room.playerX;
                     
-                    if (order === 'host_o' && hostWs === room.playerX) {
-                        [oPlayer, xPlayer] = [xPlayer, oPlayer];
-                    } else if (order === 'host_x' && hostWs === room.playerO) {
-                        [oPlayer, xPlayer] = [xPlayer, oPlayer];
-                    } else if (order === 'random' && Math.random() < 0.5) {
-                        [oPlayer, xPlayer] = [xPlayer, oPlayer];
+                    // ▼▼▼ 〇×ゲームの先手後手ロジック ▼▼▼
+                    if (room.gameType === 'tictactoe') {
+                        const order = room.settings.playerOrder;
+                        const hostWs = room.host;
+                        
+                        if (order === 'host_o' && hostWs === room.playerX) {
+                            [oPlayer, xPlayer] = [xPlayer, oPlayer];
+                        } else if (order === 'host_x' && hostWs === room.playerO) {
+                            [oPlayer, xPlayer] = [xPlayer, oPlayer];
+                        } else if (order === 'random' && Math.random() < 0.5) {
+                            [oPlayer, xPlayer] = [xPlayer, oPlayer];
+                        }
+                    }
+                    // ▼▼▼ オセロはO(黒)が先手固定 ▼▼▼
+                    else if (room.gameType === 'othello') {
+                         // Oが黒, Xが白
                     }
                     
                     room.playerO = oPlayer;
@@ -304,7 +327,8 @@ wss.on('connection', (ws) => {
                         w.send(JSON.stringify({ 
                             type: 'matchStarting', 
                             firstPlayer: 'O',
-                            myMark: mark
+                            myMark: mark,
+                            gameType: room.gameType // ▼▼▼ 新規 ▼▼▼
                         }));
                     });
                 }
@@ -314,13 +338,17 @@ wss.on('connection', (ws) => {
             case 'move': {
                 if (!room || room.gameState !== 'IN_GAME' || !playerInfo) return;
                 
-                const expectedMark = (ws === room.playerO) ? 'O' : 'X';
-                
-                broadcast(room, { 
-                    type: 'boardUpdate', 
-                    cellIndex: data.cellIndex,
-                    player: expectedMark
-                });
+                // ▼▼▼ 修正: ゲームタイプで分岐 ▼▼▼
+                if (data.gameType === 'tictactoe') {
+                    const expectedMark = (ws === room.playerO) ? 'O' : 'X';
+                    broadcast(room, { 
+                        type: 'boardUpdate', 
+                        cellIndex: data.cellIndex,
+                        player: expectedMark,
+                        gameType: 'tictactoe' // ▼▼▼ 新規 ▼▼▼
+                    });
+                }
+                // TODO: 'othello' のムーブ処理
                 break;
             }
             
@@ -333,7 +361,6 @@ wss.on('connection', (ws) => {
                 break;
             }
             
-            // ▼▼▼ 修正: 「降参」機能 ▼▼▼
             case 'surrender': {
                 if (!room || room.gameState !== 'IN_GAME' || !playerInfo) return;
 
@@ -353,11 +380,9 @@ wss.on('connection', (ws) => {
                 break;
             }
             
-            // ▼▼▼ 修正: 「ロビーに戻る」機能 ▼▼▼
             case 'returnToLobby': {
                 if (!room || !playerInfo) return; 
                 
-                // プレイヤーだった場合はスロットから抜ける
                 if (ws === room.playerO) {
                     room.playerO = null;
                 }
@@ -367,13 +392,11 @@ wss.on('connection', (ws) => {
                 playerInfo.mark = 'SPECTATOR';
                 playerInfo.isReadyForMatch = false;
 
-                // 試合後の両者がロビーに戻ったら、部屋のステータスをロビーに戻す
                 if (room.gameState === 'POST_GAME' && !room.playerO && !room.playerX) {
                     room.gameState = 'LOBBY';
                     console.log(`[${ws.roomId}] 両者がロビーに戻りました。`);
                 }
 
-                // 全員に最新のロビー状態をブロードキャスト
                 broadcast(room, { 
                     type: 'lobbyUpdate',
                     lobby: getLobbyState(room)
@@ -381,7 +404,31 @@ wss.on('connection', (ws) => {
                 break;
             }
 
-            // ▼▼▼ 修正: キック機能（スロット除外 ＆ 観戦者キック） ▼▼▼
+            // ▼▼▼ 新規: ゲーム切り替え ▼▼▼
+            case 'changeGame': {
+                if (!room || room.host !== ws) return; // ホストのみ
+                
+                const newGameType = data.gameType === 'othello' ? 'othello' : 'tictactoe';
+                room.gameType = newGameType;
+                
+                // ゲームタイプに応じてデフォルト設定をリセット
+                if (newGameType === 'othello') {
+                    room.settings = { ...othelloSettings, maxPlayers: room.settings.maxPlayers, isPublic: room.settings.isPublic };
+                } else {
+                    room.settings = { ...ticTacToeSettings, maxPlayers: room.settings.maxPlayers, isPublic: room.settings.isPublic };
+                }
+                
+                console.log(`[${ws.roomId}] Game changed to ${newGameType}`);
+                
+                // 全員にゲーム変更と設定変更を通知
+                broadcast(room, { 
+                    type: 'gameChanged', 
+                    gameType: room.gameType,
+                    settings: room.settings // 新しいデフォルト設定を送信
+                });
+                break;
+            }
+
             case 'kickPlayer': {
                 if (!room || !playerInfo || room.host !== ws) return; // ホストのみ
                 
@@ -476,12 +523,11 @@ wss.on('connection', (ws) => {
                 
                 const lobbyState = getLobbyState(room);
                 
-                // 試合中にプレイヤーが切断した場合
                 if ((room.gameState === 'IN_GAME' || room.gameState === 'POST_GAME') && wasPlayer) {
-                    room.gameState = 'LOBBY'; // 強制的にロビーに戻す
+                    room.gameState = 'LOBBY'; 
                     room.playerO = null;
                     room.playerX = null;
-                    resetReadyStates(room); // 準備状態もリセット
+                    resetReadyStates(room); 
                     
                     broadcast(room, {
                         type: 'opponentDisconnected',
@@ -496,7 +542,6 @@ wss.on('connection', (ws) => {
                         isNotification: true
                     });
                 } else {
-                    // ロビーで観戦者が退出した場合
                     broadcast(room, { 
                         type: 'lobbyUpdate', 
                         lobby: lobbyState,

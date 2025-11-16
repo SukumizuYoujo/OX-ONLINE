@@ -1,4 +1,4 @@
-// Render サーバーコード (v10.2: 途中参加、チャット制限、先手後手修正)
+// Render サーバーコード (v10.3: 途中参加、チャット制限修正)
 const WebSocket = require('ws');
 
 const port = process.env.PORT || 8080;
@@ -427,14 +427,22 @@ wss.on('connection', (ws) => {
                 });
                 ws.roomId = roomId;
 
-                ws.send(JSON.stringify({ 
+                // ▼▼▼ 修正: 途中参加者へのレスポンスに盤面状態を含める ▼▼▼
+                const response = { 
                     type: 'roomJoined', 
                     isHost: (joinedRoom.host === ws),
-                    mark: mark, // ▼▼▼ 修正 ▼▼▼
+                    mark: mark,
                     lobby: getLobbyState(joinedRoom),
                     roomId: roomId,
-                    gameType: joinedRoom.gameType 
-                }));
+                    gameType: joinedRoom.gameType
+                };
+                
+                if (joinedRoom.gameState !== 'LOBBY') {
+                    response.currentBoardState = joinedRoom.boardState;
+                    response.currentPlayer = joinedRoom.currentPlayer;
+                }
+                ws.send(JSON.stringify(response));
+                // ▲▲▲ 修正 ▲▲▲
                 
                 broadcast(joinedRoom, { type: 'lobbyUpdate', lobby: getLobbyState(joinedRoom) }, ws);
                 broadcast(joinedRoom, {
@@ -446,28 +454,6 @@ wss.on('connection', (ws) => {
                 
                 console.log(`[${roomId}] ${username} がルームに参加しました。`);
                 
-                // ▼▼▼ 新規: 試合中に参加した人に盤面を送る ▼▼▼
-                if (joinedRoom.gameState === 'IN_GAME') {
-                    ws.send(JSON.stringify({ 
-                        type: 'matchStarting', // 途中参加でもこれを使う
-                        firstPlayer: joinedRoom.currentPlayer,
-                        myMark: 'SPECTATOR',
-                        gameType: joinedRoom.gameType 
-                    }));
-                    
-                    // 現在の盤面を送信
-                    if(joinedRoom.gameType === 'tictactoe') {
-                         // 〇×ゲームは個別のmoveで盤面が再現されるので不要
-                    } else if (joinedRoom.gameType === 'othello') {
-                        ws.send(JSON.stringify({
-                            type: 'boardUpdate',
-                            boardState: joinedRoom.boardState,
-                            player: null,
-                            nextPlayer: joinedRoom.currentPlayer,
-                            gameType: 'othello'
-                        }));
-                    }
-                }
                 break;
             }
 

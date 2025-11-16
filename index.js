@@ -200,23 +200,25 @@ const othelloLogic = {
             let i = index + dir;
             
             // 盤面の端チェック
-            const newRow = Math.floor(i / 8);
-            const newCol = i % 8;
-            
-            // 期待する移動かチェック (例: -9なら左上, +1なら右)
-            // Math.abs(newCol - col) > 1 は盤の左右の端をワープしたケース
-            if (i < 0 || i > 63 || Math.abs(newRow - row) > 1 || Math.abs(newCol - col) > 1) {
-                return; 
-            }
+            if (i < 0 || i > 63) return;
+            let r = Math.floor(i / 8);
+            let c = i % 8;
+            if (Math.abs(c - col) > 1) return; // 左右の端をワープした
 
-            while (i >= 0 && i < 64 && board[i] === opponent) {
+            while (r >= 0 && r < 8 && c >= 0 && c < 8 && board[i] === opponent) {
                 path.push(i);
                 
                 const prev_i = i;
                 i += dir;
-                
+                if (i < 0 || i > 63) { // 盤外に出たら終わり
+                    path.length = 0;
+                    break;
+                }
+                r = Math.floor(i / 8);
+                c = i % 8;
+
                 // 次のマスが盤面の端をまたいでいないか再度チェック
-                if (i < 0 || i > 63 || Math.abs(Math.floor(i / 8) - Math.floor(prev_i / 8)) > 1 || Math.abs((i % 8) - (prev_i % 8)) > 1) {
+                if (Math.abs(c - (prev_i % 8)) > 1) {
                     path.length = 0; // 無効なパス
                     break; 
                 }
@@ -435,10 +437,15 @@ wss.on('connection', (ws) => {
                     
                     console.log(`[${ws.roomId}] 設定が更新されました。`);
                     
+                    // ▼▼▼ 修正: lobbyUpdateもブロードキャストする ▼▼▼
                     broadcast(room, { 
                         type: 'settingsUpdated', 
                         settings: room.settings 
-                    }, ws);
+                    });
+                    broadcast(room, { 
+                        type: 'lobbyUpdate',
+                        lobby: getLobbyState(room)
+                    });
                 }
                 break;
             }

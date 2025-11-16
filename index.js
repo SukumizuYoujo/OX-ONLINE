@@ -1,4 +1,4 @@
-// Render サーバーコード (v10.0: ゲーム切替基盤、オセロスタブ追加)
+// Render サーバーコード (v10.0: ゲーム切替基盤、オセロロジック実装)
 const WebSocket = require('ws');
 
 const port = process.env.PORT || 8080;
@@ -70,6 +70,269 @@ const othelloSettings = {
     highlightOldest: false,
 };
 
+// =================================================================
+// ▼▼▼ 新規: サーバー側ゲームロジック ▼▼▼
+// =================================================================
+
+// サーバー側 〇×ゲームロジック
+const ticTacToeLogic = {
+    generateWinningConditions: (size) => {
+        const conditions = [];
+        const winLength = (size === 3) ? 3 : (size === 4 ? 4 : 5);
+        for (let r = 0; r < size; r++) {
+            for (let c = 0; c <= size - winLength; c++) {
+                const horizontal = [];
+                for (let i = 0; i < winLength; i++) horizontal.push(r * size + (c + i));
+                conditions.push(horizontal);
+                const vertical = [];
+                for (let i = 0; i < winLength; i++) vertical.push((c + i) * size + r);
+                conditions.push(vertical);
+            }
+        }
+        for (let r = 0; r <= size - winLength; r++) {
+            for (let c = 0; c <= size - winLength; c++) {
+                const diag1 = [];
+                const diag2 = [];
+                for (let i = 0; i < winLength; i++) {
+                    diag1.push((r + i) * size + (c + i));
+                    diag2.push((r + i) * size + (c + winLength - 1 - i));
+                }
+                conditions.push(diag1);
+                conditions.push(diag2);
+            }
+        }
+        return conditions;
+    },
+    
+    initializeBoard: (room) => {
+        const size = room.settings.boardSize;
+        room.boardState = Array(size * size).fill('');
+        room.winningConditions = ticTacToeLogic.generateWinningConditions(size);
+        room.oQueue = [];
+        room.xQueue = [];
+        room.currentPlayer = 'O'; // 〇×ゲームはOが先手
+    },
+
+    handleMove: (room, ws, cellIndex) => {
+        const player = (ws === room.playerO) ? 'O' : 'X';
+        
+        // ターン確認
+        if (room.currentPlayer !== player) {
+            return; // ターンが違う
+        }
+        // マスが空か確認
+        if (room.boardState[cellIndex] !== '') {
+            return; // マスが空ではない
+        }
+
+        const limitMode = room.settings.limitMode;
+        const boardSize = room.settings.boardSize;
+        
+        if (limitMode && boardSize === 3) {
+            const queue = (player === 'O') ? room.oQueue : room.xQueue;
+            if (queue.length >= 3) {
+                const indexToClear = queue.shift();
+                room.boardState[indexToClear] = '';
+            }
+            queue.push(cellIndex);
+        }
+        
+        room.boardState[cellIndex] = player;
+        const nextPlayer = player === 'O' ? 'X' : 'O';
+        
+        broadcast(room, { 
+            type: 'boardUpdate', 
+            cellIndex: cellIndex,
+            player: player,
+            nextPlayer: nextPlayer,
+            gameType: 'tictactoe'
+        });
+        
+        room.currentPlayer = nextPlayer;
+
+        // 勝敗判定
+        if (ticTacToeLogic.checkWin(room, player)) {
+            room.gameState = 'POST_GAME';
+            broadcast(room, { type: 'gameOver', result: player, gameType: 'tictactoe' });
+            resetReadyStates(room);
+        } else if (ticTacToeLogic.checkDraw(room)) {
+            room.gameState = 'POST_GAME';
+            broadcast(room, { type: 'gameOver', result: 'DRAW', gameType: 'tictactoe' });
+            resetReadyStates(room);
+        }
+    },
+    
+    checkWin: (room, player) => {
+        for (const condition of room.winningConditions) {
+            if (condition.every(index => room.boardState[index] === player)) {
+                return true;
+            }
+        }
+        return false;
+    },
+    
+    checkDraw: (room) => {
+        return !room.boardState.includes('');
+    }
+};
+
+// サーバー側 オセロロジック
+const othelloLogic = {
+    directions: [-9, -8, -7, -1, 1, 7, 8, 9], // 8方向 (row-1,col-1), (row-1,col), (row-1,col+1), ...
+
+    initializeBoard: (room) => {
+        room.boardState = Array(64).fill('');
+        room.boardState[27] = 'X'; // 白
+        room.boardState[36] = 'X'; // 白
+        room.boardState[28] = 'O'; // 黒
+        room.boardState[35] = 'O'; // 黒
+        room.currentPlayer = 'O'; // 黒(O)が先手
+    },
+    
+    getFlips: (board, index, player, opponent) => {
+        const flips = [];
+        const row = Math.floor(index / 8);
+        const col = index % 8;
+        
+        othelloLogic.directions.forEach(dir => {
+            const path = [];
+            let i = index + dir;
+            let r = Math.floor(i / 8);
+            let c = i % 8;
+
+            // 盤面の端チェック (例: 1列目から-1(左)や-9(左上)に行けない)
+            const rowDiff = Math.floor((i + 8) / 8) - Math.floor((index + 8) / 8); // -1, 0, 1
+            const colDiff = (i % 8) - (index % 8); // -1, 0, 1 (ただし端をまたぐと +/- 7 になる)
+            
+            // 期待する移動かチェック (例: dir=-9 なら rowDiff=-1, colDiff=-1)
+            const expectedRowDiff = Math.round(dir / 8); // -1, 0, 1
+            let expectedColDiff = (dir % 8);
+            if (expectedColDiff > 1) expectedColDiff -= 8; // 7 -> -1
+            if (expectedColDiff < -1) expectedColDiff += 8; // -7 -> 1
+
+            if (rowDiff !== expectedRowDiff || colDiff !== expectedColDiff) {
+                 return; // 盤面の端を越えた
+            }
+
+
+            while (r >= 0 && r < 8 && c >= 0 && c < 8 && board[i] === opponent) {
+                path.push(i);
+                
+                i += dir;
+                r = Math.floor(i / 8);
+                c = i % 8;
+                
+                // 次のマスが盤面の端をまたいでいないか再度チェック
+                const nextRowDiff = Math.floor((i + 8) / 8) - Math.floor((i-dir + 8) / 8);
+                const nextColDiff = (i % 8) - ((i-dir) % 8);
+                if (nextRowDiff !== expectedRowDiff || nextColDiff !== expectedColDiff) {
+                    break; // 盤面の端を越えた
+                }
+            }
+            
+            if (r >= 0 && r < 8 && c >= 0 && c < 8 && board[i] === player && path.length > 0) {
+                flips.push(...path);
+            }
+        });
+        return flips;
+    },
+
+    getValidMoves: (board, player) => {
+        const opponent = player === 'O' ? 'X' : 'O';
+        const moves = [];
+        for (let i = 0; i < 64; i++) {
+            if (board[i] === '') {
+                if (othelloLogic.getFlips(board, i, player, opponent).length > 0) {
+                    moves.push(i);
+                }
+            }
+        }
+        return moves;
+    },
+
+    getScores: (board) => {
+        let oScore = 0;
+        let xScore = 0;
+        board.forEach(cell => {
+            if (cell === 'O') oScore++;
+            else if (cell === 'X') xScore++;
+        });
+        return { O: oScore, X: xScore };
+    },
+
+    handleMove: (room, ws, cellIndex) => {
+        const player = (ws === room.playerO) ? 'O' : 'X';
+        const opponent = player === 'O' ? 'X' : 'O';
+        
+        if (room.currentPlayer !== player) return; // ターンが違う
+        if (room.boardState[cellIndex] !== '') return; // マスが空ではない
+        
+        const flips = othelloLogic.getFlips(room.boardState, cellIndex, player, opponent);
+        
+        if (flips.length === 0) {
+            ws.send(JSON.stringify({ type: 'error', message: 'そこには置けません。' }));
+            return; // 無効な手
+        }
+
+        // 手を適用
+        room.boardState[cellIndex] = player;
+        flips.forEach(i => room.boardState[i] = player);
+        
+        let nextPlayer = opponent;
+        
+        // 相手の有効手チェック
+        let validMoves = othelloLogic.getValidMoves(room.boardState, nextPlayer);
+        if (validMoves.length === 0) {
+            // 相手はパス
+            nextPlayer = player; // ターンを自分に戻す
+            validMoves = othelloLogic.getValidMoves(room.boardState, nextPlayer);
+            
+            if (validMoves.length === 0) {
+                // 両者パス -> ゲーム終了
+                room.gameState = 'POST_GAME';
+                const scores = othelloLogic.getScores(room.boardState);
+                let result = 'DRAW';
+                if (scores.O > scores.X) result = 'O';
+                else if (scores.X > scores.O) result = 'X';
+                
+                broadcast(room, { 
+                    type: 'gameOver', 
+                    result: result, 
+                    scores: scores, 
+                    gameType: 'othello' 
+                });
+                resetReadyStates(room);
+                return;
+            }
+            
+            // 相手のパスを通知
+            broadcast(room, {
+                type: 'passTurn',
+                passedPlayer: opponent,
+                nextPlayer: nextPlayer,
+                boardState: room.boardState
+            });
+            room.currentPlayer = nextPlayer;
+            return;
+        }
+
+        // 通常のターン移行
+        room.currentPlayer = nextPlayer;
+        broadcast(room, {
+            type: 'boardUpdate',
+            boardState: room.boardState,
+            player: player, // 今回置いた人
+            nextPlayer: nextPlayer, // 次の人
+            gameType: 'othello'
+        });
+    }
+};
+
+// =================================================================
+// ▲▲▲ 新規: サーバー側ゲームロジック ▲▲▲
+// =================================================================
+
+
 // === 接続処理 ===
 
 wss.on('connection', (ws) => {
@@ -111,7 +374,9 @@ wss.on('connection', (ws) => {
                     host: ws,
                     isPublic: settings.isPublic, 
                     maxPlayers: settings.maxPlayers,
-                    gameType: gameType // ▼▼▼ 新規: ゲームタイプ ▼▼▼
+                    gameType: gameType, // ▼▼▼ 新規: ゲームタイプ ▼▼▼
+                    boardState: [], // ▼▼▼ 新規: 盤面 ▼▼▼
+                    currentPlayer: 'O' // ▼▼▼ 新規: 現在のターン ▼▼▼
                 };
                 
                 newRoom.players.set(ws, { username: username, mark: 'SPECTATOR', slotCooldownUntil: 0 });
@@ -317,6 +582,13 @@ wss.on('connection', (ws) => {
                     
                     room.playerO = oPlayer;
                     room.playerX = xPlayer;
+
+                    // ▼▼▼ 修正: ゲームロジック初期化 ▼▼▼
+                    if (room.gameType === 'tictactoe') {
+                        ticTacToeLogic.initializeBoard(room);
+                    } else if (room.gameType === 'othello') {
+                        othelloLogic.initializeBoard(room);
+                    }
                     
                     room.players.forEach((p, w) => {
                         let mark = 'SPECTATOR';
@@ -328,7 +600,7 @@ wss.on('connection', (ws) => {
                             type: 'matchStarting', 
                             firstPlayer: 'O',
                             myMark: mark,
-                            gameType: room.gameType // ▼▼▼ 新規 ▼▼▼
+                            gameType: room.gameType 
                         }));
                     });
                 }
@@ -338,17 +610,12 @@ wss.on('connection', (ws) => {
             case 'move': {
                 if (!room || room.gameState !== 'IN_GAME' || !playerInfo) return;
                 
-                // ▼▼▼ 修正: ゲームタイプで分岐 ▼▼▼
+                // ▼▼▼ 修正: ゲームタイプでロジック分岐 ▼▼▼
                 if (data.gameType === 'tictactoe') {
-                    const expectedMark = (ws === room.playerO) ? 'O' : 'X';
-                    broadcast(room, { 
-                        type: 'boardUpdate', 
-                        cellIndex: data.cellIndex,
-                        player: expectedMark,
-                        gameType: 'tictactoe' // ▼▼▼ 新規 ▼▼▼
-                    });
+                    ticTacToeLogic.handleMove(room, ws, data.cellIndex);
+                } else if (data.gameType === 'othello') {
+                    othelloLogic.handleMove(room, ws, data.cellIndex);
                 }
-                // TODO: 'othello' のムーブ処理
                 break;
             }
             
@@ -356,7 +623,7 @@ wss.on('connection', (ws) => {
                 if (!room || room.gameState !== 'IN_GAME') return;
                 room.gameState = 'POST_GAME';
                 console.log(`[${ws.roomId}] 試合終了: ${data.result}`);
-                broadcast(room, { type: 'gameOver', result: data.result });
+                broadcast(room, { type: 'gameOver', result: data.result, gameType: data.gameType, scores: data.scores });
                 resetReadyStates(room);
                 break;
             }
@@ -374,7 +641,13 @@ wss.on('connection', (ws) => {
                 if (winnerMark !== 'DRAW') {
                     room.gameState = 'POST_GAME';
                     console.log(`[${ws.roomId}] ${playerInfo.username} が降参。${winnerMark} の勝利。`);
-                    broadcast(room, { type: 'gameOver', result: winnerMark });
+                    
+                    let scores = null;
+                    if(data.gameType === 'othello') {
+                        scores = { O: 0, X: 0 }; // 降参なのでスコアは 0-0 で勝敗だけ
+                    }
+                    
+                    broadcast(room, { type: 'gameOver', result: winnerMark, gameType: data.gameType, scores: scores });
                     resetReadyStates(room);
                 }
                 break;
@@ -425,6 +698,11 @@ wss.on('connection', (ws) => {
                     type: 'gameChanged', 
                     gameType: room.gameType,
                     settings: room.settings // 新しいデフォルト設定を送信
+                });
+                // ロビー状態も更新
+                 broadcast(room, { 
+                    type: 'lobbyUpdate',
+                    lobby: getLobbyState(room)
                 });
                 break;
             }

@@ -57,7 +57,7 @@ function resetReadyStates(room) {
 // 〇×ゲームのデフォルト設定
 const ticTacToeSettings = {
     boardSize: 3,
-    playerOrder: 'random',
+    playerOrder: 'assigned', // ▼▼▼ 修正: 'assigned'に変更 ▼▼▼
     limitMode: false,
     highlightOldest: false,
 };
@@ -65,7 +65,7 @@ const ticTacToeSettings = {
 // オセロのデフォルト設定
 const othelloSettings = {
     boardSize: 8, // オセロは8x8固定
-    playerOrder: 'host_o', // 黒(O)が先手固定
+    playerOrder: 'assigned', // ▼▼▼ 修正: 'assigned'に変更 ▼▼▼
     limitMode: false,
     highlightOldest: false,
 };
@@ -212,15 +212,11 @@ const othelloLogic = {
             while (i >= 0 && i < 64 && board[i] === opponent) {
                 path.push(i);
                 
-                const currentRow = Math.floor(i / 8);
-                const currentCol = i % 8;
-                
+                const prev_i = i;
                 i += dir;
-                const nextRow = Math.floor(i / 8);
-                const nextCol = i % 8;
-
+                
                 // 次のマスが盤面の端をまたいでいないか再度チェック
-                if (i < 0 || i > 63 || Math.abs(nextRow - currentRow) > 1 || Math.abs(nextCol - currentCol) > 1) {
+                if (i < 0 || i > 63 || Math.abs(Math.floor(i / 8) - Math.floor(prev_i / 8)) > 1 || Math.abs((i % 8) - (prev_i % 8)) > 1) {
                     path.length = 0; // 無効なパス
                     break; 
                 }
@@ -265,7 +261,8 @@ const othelloLogic = {
         const flips = othelloLogic.getFlips(room.boardState, cellIndex, player);
         
         if (flips.length === 0) {
-            ws.send(JSON.stringify({ type: 'error', message: 'そこには置けません。' }));
+             // ▼▼▼ 修正: 無効な手はアラートなしで無視 ▼▼▼
+            // ws.send(JSON.stringify({ type: 'error', message: 'そこには置けません。' }));
             return; // 無効な手
         }
 
@@ -356,7 +353,9 @@ wss.on('connection', (ws) => {
                     isPublic: data.settings.isPublic ?? true,
                     maxPlayers: Math.max(2, Math.min(100, data.settings.maxPlayers || 10))
                 };
-                
+                // ▼▼▼ 修正: クライアントから来たplayerOrderを尊重 ▼▼▼
+                settings.playerOrder = data.settings.playerOrder || defaultSettings.playerOrder;
+
                 const username = data.username || `User${Math.floor(Math.random() * 1000)}`;
                 
                 const newRoom = {
@@ -429,12 +428,10 @@ wss.on('connection', (ws) => {
 
             case 'updateSettings': {
                 if (room && room.host === ws) {
-                    // 〇×ゲームの設定のみ更新（オセロは未対応）
-                    if (room.gameType === 'tictactoe') {
-                         room.settings = { ...room.settings, ...(data.settings || {}) };
-                         room.settings.maxPlayers = Math.max(2, Math.min(100, room.settings.maxPlayers || 10));
-                         room.maxPlayers = room.settings.maxPlayers;
-                    }
+                    // ▼▼▼ 修正: 両方のゲームで共通の設定を更新 ▼▼▼
+                    room.settings = { ...room.settings, ...(data.settings || {}) };
+                    room.settings.maxPlayers = Math.max(2, Math.min(100, room.settings.maxPlayers || 10));
+                    room.maxPlayers = room.settings.maxPlayers;
                     
                     console.log(`[${ws.roomId}] 設定が更新されました。`);
                     
@@ -557,23 +554,12 @@ wss.on('connection', (ws) => {
                     let oPlayer = room.playerO;
                     let xPlayer = room.playerX;
                     
-                    // ▼▼▼ 〇×ゲームの先手後手ロジック ▼▼▼
-                    if (room.gameType === 'tictactoe') {
-                        const order = room.settings.playerOrder;
-                        const hostWs = room.host;
-                        
-                        if (order === 'host_o' && hostWs === room.playerX) {
-                            [oPlayer, xPlayer] = [xPlayer, oPlayer];
-                        } else if (order === 'host_x' && hostWs === room.playerO) {
-                            [oPlayer, xPlayer] = [xPlayer, oPlayer];
-                        } else if (order === 'random' && Math.random() < 0.5) {
-                            [oPlayer, xPlayer] = [xPlayer, oPlayer];
-                        }
+                    // ▼▼▼ 修正: 先手後手ロジック ▼▼▼
+                    const order = room.settings.playerOrder;
+                    if (order === 'random' && Math.random() < 0.5) {
+                        [oPlayer, xPlayer] = [xPlayer, oPlayer];
                     }
-                    // ▼▼▼ オセロはO(黒)が先手固定 ▼▼▼
-                    else if (room.gameType === 'othello') {
-                         // Oが黒, Xが白 (順序そのまま)
-                    }
+                    // 'assigned' の場合は何もしない (OスロットがO(黒))
                     
                     room.playerO = oPlayer;
                     room.playerX = xPlayer;
@@ -685,6 +671,9 @@ wss.on('connection', (ws) => {
                 } else {
                     room.settings = { ...ticTacToeSettings, maxPlayers: room.settings.maxPlayers, isPublic: room.settings.isPublic };
                 }
+                // ▼▼▼ 修正: 変更時もランダム/指定を引き継ぐ ▼▼▼
+                room.settings.playerOrder = data.playerOrder || (newGameType === 'othello' ? 'assigned' : 'random');
+                
                 
                 console.log(`[${ws.roomId}] Game changed to ${newGameType}`);
                 

@@ -571,16 +571,16 @@ wss.on('connection', (ws) => {
                 // ▼▼▼ 新規: チャット連投対策 ▼▼▼
                 const now = Date.now();
                 
-                // 1. 3-second cooldown
-                if (now - playerInfo.lastMessageTime < 3000) {
-                    ws.send(JSON.stringify({ type: 'error', message: 'メッセージの送信が早すぎます。3秒待ってください。' }));
+                // 1. 1-second cooldown (ご要望により3秒から変更)
+                if (now - playerInfo.lastMessageTime < 1000) {
+                    ws.send(JSON.stringify({ type: 'error', message: 'メッセージの送信が早すぎます。1秒待ってください。' }));
                     return;
                 }
                 
-                // 2. 10 messages per minute
+                // 2. 20 messages per minute (ご要望により10回から変更)
                 playerInfo.messageTimestamps = playerInfo.messageTimestamps.filter(t => now - t < 60000); // Keep last 60s
-                if (playerInfo.messageTimestamps.length >= 10) {
-                    ws.send(JSON.stringify({ type: 'error', message: 'メッセージの送信が多すぎます。1分間に10回までです。' }));
+                if (playerInfo.messageTimestamps.length >= 20) {
+                    ws.send(JSON.stringify({ type: 'error', message: 'メッセージの送信が多すぎます。1分間に20回までです。' }));
                     return;
                 }
 

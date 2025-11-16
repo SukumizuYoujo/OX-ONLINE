@@ -671,7 +671,7 @@ wss.on('connection', (ws) => {
                 } else {
                     room.settings = { ...ticTacToeSettings, maxPlayers: room.settings.maxPlayers, isPublic: room.settings.isPublic };
                 }
-                // ▼▼▼ 修正: 変更時もランダム/指定を引き継ぐ ▼▼▼
+                // ▼▼▼ 修正: クライアントから送られたplayerOrderを引き継ぐ ▼▼▼
                 room.settings.playerOrder = data.playerOrder || (newGameType === 'othello' ? 'assigned' : 'random');
                 
                 

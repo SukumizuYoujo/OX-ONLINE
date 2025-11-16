@@ -1,4 +1,4 @@
-// Render サーバーコード (v10.2: 途中参加、先手後手修正)
+// Render サーバーコード (v10.2: 途中参加、チャット制限、先手後手修正)
 const WebSocket = require('ws');
 
 const port = process.env.PORT || 8080;
@@ -357,7 +357,7 @@ wss.on('connection', (ws) => {
                 // ▼▼▼ 修正: クライアントから来たplayerOrderを尊重 ▼▼▼
                 settings.playerOrder = data.settings.playerOrder || defaultSettings.playerOrder;
 
-                const username = data.username || `User${Math.floor(Math.random() * 1000)}`;
+                const username = data.username.substring(0, 20) || `User${Math.floor(Math.random() * 1000)}`; // ▼▼▼ 修正: 文字数制限 ▼▼▼
                 
                 const newRoom = {
                     id: roomId, 
@@ -369,12 +369,19 @@ wss.on('connection', (ws) => {
                     host: ws,
                     isPublic: settings.isPublic, 
                     maxPlayers: settings.maxPlayers,
-                    gameType: gameType, // ▼▼▼ 新規: ゲームタイプ ▼▼▼
-                    boardState: [], // ▼▼▼ 新規: 盤面 ▼▼▼
-                    currentPlayer: 'O' // ▼▼▼ 新規: 現在のターン ▼▼▼
+                    gameType: gameType, 
+                    boardState: [], 
+                    currentPlayer: 'O' 
                 };
                 
-                newRoom.players.set(ws, { username: username, mark: 'SPECTATOR', slotCooldownUntil: 0 });
+                // ▼▼▼ 修正: チャット制限用プロパティ追加 ▼▼▼
+                newRoom.players.set(ws, { 
+                    username: username, 
+                    mark: 'SPECTATOR', 
+                    slotCooldownUntil: 0,
+                    lastMessageTime: 0,
+                    messageTimestamps: []
+                });
                 rooms.set(roomId, newRoom);
                 ws.roomId = roomId;
 
@@ -384,7 +391,7 @@ wss.on('connection', (ws) => {
                     mark: 'SPECTATOR',
                     lobby: getLobbyState(newRoom),
                     roomId: roomId,
-                    gameType: newRoom.gameType // ▼▼▼ 新規 ▼▼▼
+                    gameType: newRoom.gameType 
                 }));
                 console.log(`[${roomId}] ${username} が ${gameType} ルームを作成しました。`);
                 break;
@@ -392,7 +399,7 @@ wss.on('connection', (ws) => {
             
             case 'joinRoom': {
                 const roomId = data.roomId.toUpperCase();
-                const username = data.username || `User${Math.floor(Math.random() * 1000)}`;
+                const username = data.username.substring(0, 20) || `User${Math.floor(Math.random() * 1000)}`; // ▼▼▼ 修正: 文字数制限 ▼▼▼
                 const joinedRoom = rooms.get(roomId);
 
                 if (!joinedRoom) {
@@ -410,7 +417,14 @@ wss.on('connection', (ws) => {
                     mark = 'SPECTATOR';
                 }
                 
-                joinedRoom.players.set(ws, { username: username, mark: mark, slotCooldownUntil: 0 });
+                // ▼▼▼ 修正: チャット制限用プロパティ追加 ▼▼▼
+                joinedRoom.players.set(ws, { 
+                    username: username, 
+                    mark: mark, 
+                    slotCooldownUntil: 0,
+                    lastMessageTime: 0,
+                    messageTimestamps: []
+                });
                 ws.roomId = roomId;
 
                 ws.send(JSON.stringify({ 
@@ -419,7 +433,7 @@ wss.on('connection', (ws) => {
                     mark: mark, // ▼▼▼ 修正 ▼▼▼
                     lobby: getLobbyState(joinedRoom),
                     roomId: roomId,
-                    gameType: joinedRoom.gameType // ▼▼▼ 新規 ▼▼▼
+                    gameType: joinedRoom.gameType 
                 }));
                 
                 broadcast(joinedRoom, { type: 'lobbyUpdate', lobby: getLobbyState(joinedRoom) }, ws);
@@ -487,7 +501,7 @@ wss.on('connection', (ws) => {
                             count: room.players.size,
                             max: room.maxPlayers,
                             inGame: room.gameState !== 'LOBBY',
-                            gameType: room.gameType // ▼▼▼ 新規 ▼▼▼
+                            gameType: room.gameType 
                         });
                     }
                 });
@@ -552,13 +566,36 @@ wss.on('connection', (ws) => {
             }
             
             case 'chat': {
-                if (room && playerInfo && data.message) {
-                    broadcast(room, {
-                        type: 'newChat',
-                        from: playerInfo.username,
-                        message: data.message
-                    }, ws);
+                if (!room || !playerInfo || !data.message) return;
+                
+                // ▼▼▼ 新規: チャット連投対策 ▼▼▼
+                const now = Date.now();
+                
+                // 1. 3-second cooldown
+                if (now - playerInfo.lastMessageTime < 3000) {
+                    ws.send(JSON.stringify({ type: 'error', message: 'メッセージの送信が早すぎます。3秒待ってください。' }));
+                    return;
                 }
+                
+                // 2. 10 messages per minute
+                playerInfo.messageTimestamps = playerInfo.messageTimestamps.filter(t => now - t < 60000); // Keep last 60s
+                if (playerInfo.messageTimestamps.length >= 10) {
+                    ws.send(JSON.stringify({ type: 'error', message: 'メッセージの送信が多すぎます。1分間に10回までです。' }));
+                    return;
+                }
+
+                // All checks passed
+                playerInfo.lastMessageTime = now;
+                playerInfo.messageTimestamps.push(now);
+                
+                // ▼▼▼ 修正: 文字数制限 ▼▼▼
+                const messageContent = data.message.substring(0, 200);
+
+                broadcast(room, {
+                    type: 'newChat',
+                    from: playerInfo.username,
+                    message: messageContent
+                }, ws);
                 break;
             }
 

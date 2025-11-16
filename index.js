@@ -1,4 +1,4 @@
-// Render サーバーコード (v10.0: ゲーム切替基盤、オセロロジック実装)
+// Render サーバーコード (v10.1: オセロロジック実装)
 const WebSocket = require('ws');
 
 const port = process.env.PORT || 8080;
@@ -189,7 +189,8 @@ const othelloLogic = {
         room.currentPlayer = 'O'; // 黒(O)が先手
     },
     
-    getFlips: (board, index, player, opponent) => {
+    getFlips: (board, index, player) => {
+        const opponent = player === 'O' ? 'X' : 'O';
         const flips = [];
         const row = Math.floor(index / 8);
         const col = index % 8;
@@ -197,40 +198,35 @@ const othelloLogic = {
         othelloLogic.directions.forEach(dir => {
             const path = [];
             let i = index + dir;
-            let r = Math.floor(i / 8);
-            let c = i % 8;
-
-            // 盤面の端チェック (例: 1列目から-1(左)や-9(左上)に行けない)
-            const rowDiff = Math.floor((i + 8) / 8) - Math.floor((index + 8) / 8); // -1, 0, 1
-            const colDiff = (i % 8) - (index % 8); // -1, 0, 1 (ただし端をまたぐと +/- 7 になる)
             
-            // 期待する移動かチェック (例: dir=-9 なら rowDiff=-1, colDiff=-1)
-            const expectedRowDiff = Math.round(dir / 8); // -1, 0, 1
-            let expectedColDiff = (dir % 8);
-            if (expectedColDiff > 1) expectedColDiff -= 8; // 7 -> -1
-            if (expectedColDiff < -1) expectedColDiff += 8; // -7 -> 1
-
-            if (rowDiff !== expectedRowDiff || colDiff !== expectedColDiff) {
-                 return; // 盤面の端を越えた
+            // 盤面の端チェック
+            const newRow = Math.floor(i / 8);
+            const newCol = i % 8;
+            
+            // 期待する移動かチェック (例: -9なら左上, +1なら右)
+            // Math.abs(newCol - col) > 1 は盤の左右の端をワープしたケース
+            if (i < 0 || i > 63 || Math.abs(newRow - row) > 1 || Math.abs(newCol - col) > 1) {
+                return; 
             }
 
-
-            while (r >= 0 && r < 8 && c >= 0 && c < 8 && board[i] === opponent) {
+            while (i >= 0 && i < 64 && board[i] === opponent) {
                 path.push(i);
                 
-                i += dir;
-                r = Math.floor(i / 8);
-                c = i % 8;
+                const currentRow = Math.floor(i / 8);
+                const currentCol = i % 8;
                 
+                i += dir;
+                const nextRow = Math.floor(i / 8);
+                const nextCol = i % 8;
+
                 // 次のマスが盤面の端をまたいでいないか再度チェック
-                const nextRowDiff = Math.floor((i + 8) / 8) - Math.floor((i-dir + 8) / 8);
-                const nextColDiff = (i % 8) - ((i-dir) % 8);
-                if (nextRowDiff !== expectedRowDiff || nextColDiff !== expectedColDiff) {
-                    break; // 盤面の端を越えた
+                if (i < 0 || i > 63 || Math.abs(nextRow - currentRow) > 1 || Math.abs(nextCol - currentCol) > 1) {
+                    path.length = 0; // 無効なパス
+                    break; 
                 }
             }
             
-            if (r >= 0 && r < 8 && c >= 0 && c < 8 && board[i] === player && path.length > 0) {
+            if (i >= 0 && i < 64 && board[i] === player && path.length > 0) {
                 flips.push(...path);
             }
         });
@@ -238,11 +234,10 @@ const othelloLogic = {
     },
 
     getValidMoves: (board, player) => {
-        const opponent = player === 'O' ? 'X' : 'O';
         const moves = [];
         for (let i = 0; i < 64; i++) {
             if (board[i] === '') {
-                if (othelloLogic.getFlips(board, i, player, opponent).length > 0) {
+                if (othelloLogic.getFlips(board, i, player).length > 0) {
                     moves.push(i);
                 }
             }
@@ -267,7 +262,7 @@ const othelloLogic = {
         if (room.currentPlayer !== player) return; // ターンが違う
         if (room.boardState[cellIndex] !== '') return; // マスが空ではない
         
-        const flips = othelloLogic.getFlips(room.boardState, cellIndex, player, opponent);
+        const flips = othelloLogic.getFlips(room.boardState, cellIndex, player);
         
         if (flips.length === 0) {
             ws.send(JSON.stringify({ type: 'error', message: 'そこには置けません。' }));
@@ -577,7 +572,7 @@ wss.on('connection', (ws) => {
                     }
                     // ▼▼▼ オセロはO(黒)が先手固定 ▼▼▼
                     else if (room.gameType === 'othello') {
-                         // Oが黒, Xが白
+                         // Oが黒, Xが白 (順序そのまま)
                     }
                     
                     room.playerO = oPlayer;
@@ -644,7 +639,7 @@ wss.on('connection', (ws) => {
                     
                     let scores = null;
                     if(data.gameType === 'othello') {
-                        scores = { O: 0, X: 0 }; // 降参なのでスコアは 0-0 で勝敗だけ
+                        scores = othelloLogic.getScores(room.boardState); // 降参時もスコアを計算
                     }
                     
                     broadcast(room, { type: 'gameOver', result: winnerMark, gameType: data.gameType, scores: scores });

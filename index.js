@@ -1,4 +1,4 @@
-// Render サーバーコード (v10.1: オセロロジック実装)
+// Render サーバーコード (v10.2: 途中参加、先手後手修正)
 const WebSocket = require('ws');
 
 const port = process.env.PORT || 8080;
@@ -121,8 +121,8 @@ const ticTacToeLogic = {
             return; // ターンが違う
         }
         // マスが空か確認
-        if (room.boardState[cellIndex] !== '') {
-            return; // マスが空ではない
+        if (cellIndex < 0 || cellIndex >= room.boardState.length || room.boardState[cellIndex] !== '') {
+            return; // マスが空ではないか、無効なindex
         }
 
         const limitMode = room.settings.limitMode;
@@ -258,13 +258,12 @@ const othelloLogic = {
         const opponent = player === 'O' ? 'X' : 'O';
         
         if (room.currentPlayer !== player) return; // ターンが違う
-        if (room.boardState[cellIndex] !== '') return; // マスが空ではない
+        if (cellIndex < 0 || cellIndex > 63 || room.boardState[cellIndex] !== '') return; // マスが空ではない
         
         const flips = othelloLogic.getFlips(room.boardState, cellIndex, player);
         
         if (flips.length === 0) {
              // ▼▼▼ 修正: 無効な手はアラートなしで無視 ▼▼▼
-            // ws.send(JSON.stringify({ type: 'error', message: 'そこには置けません。' }));
             return; // 無効な手
         }
 
@@ -403,14 +402,21 @@ wss.on('connection', (ws) => {
                 if (joinedRoom.players.size >= joinedRoom.maxPlayers) {
                     ws.send(JSON.stringify({ type: 'error', message: 'ルームは満員です。' })); return;
                 }
+
+                // ▼▼▼ 修正: 試合中の参加は強制的に観戦者 ▼▼▼
+                let mark = 'SPECTATOR';
+                if (joinedRoom.gameState !== 'LOBBY') {
+                    console.log(`[${roomId}] ${username} が試合中のため観戦者として参加。`);
+                    mark = 'SPECTATOR';
+                }
                 
-                joinedRoom.players.set(ws, { username: username, mark: 'SPECTATOR', slotCooldownUntil: 0 });
+                joinedRoom.players.set(ws, { username: username, mark: mark, slotCooldownUntil: 0 });
                 ws.roomId = roomId;
 
                 ws.send(JSON.stringify({ 
                     type: 'roomJoined', 
                     isHost: (joinedRoom.host === ws),
-                    mark: 'SPECTATOR',
+                    mark: mark, // ▼▼▼ 修正 ▼▼▼
                     lobby: getLobbyState(joinedRoom),
                     roomId: roomId,
                     gameType: joinedRoom.gameType // ▼▼▼ 新規 ▼▼▼
@@ -425,6 +431,28 @@ wss.on('connection', (ws) => {
                 }, ws);
                 
                 console.log(`[${roomId}] ${username} がルームに参加しました。`);
+                
+                // ▼▼▼ 新規: 試合中に参加した人に盤面を送る ▼▼▼
+                if (joinedRoom.gameState === 'IN_GAME') {
+                    ws.send(JSON.stringify({ 
+                        type: 'matchStarting', // 途中参加でもこれを使う
+                        firstPlayer: joinedRoom.currentPlayer,
+                        myMark: 'SPECTATOR',
+                        gameType: joinedRoom.gameType 
+                    }));
+                    // 現在の盤面を送信
+                    if(joinedRoom.gameType === 'tictactoe') {
+                         // 〇×ゲームは個別のmoveで盤面が再現されるので不要
+                    } else if (joinedRoom.gameType === 'othello') {
+                        ws.send(JSON.stringify({
+                            type: 'boardUpdate',
+                            boardState: joinedRoom.boardState,
+                            player: null,
+                            nextPlayer: joinedRoom.currentPlayer,
+                            gameType: 'othello'
+                        }));
+                    }
+                }
                 break;
             }
 
@@ -679,7 +707,7 @@ wss.on('connection', (ws) => {
                     room.settings = { ...ticTacToeSettings, maxPlayers: room.settings.maxPlayers, isPublic: room.settings.isPublic };
                 }
                 // ▼▼▼ 修正: クライアントから送られたplayerOrderを引き継ぐ ▼▼▼
-                room.settings.playerOrder = data.playerOrder || (newGameType === 'othello' ? 'assigned' : 'random');
+                room.settings.playerOrder = data.playerOrder || (newGameType === 'othello' ? 'assigned' : 'tictactoe' ? 'assigned' : 'random');
                 
                 
                 console.log(`[${ws.roomId}] Game changed to ${newGameType}`);

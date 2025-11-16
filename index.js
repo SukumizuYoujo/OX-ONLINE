@@ -454,6 +454,7 @@ wss.on('connection', (ws) => {
                         myMark: 'SPECTATOR',
                         gameType: joinedRoom.gameType 
                     }));
+                    
                     // 現在の盤面を送信
                     if(joinedRoom.gameType === 'tictactoe') {
                          // 〇×ゲームは個別のmoveで盤面が再現されるので不要

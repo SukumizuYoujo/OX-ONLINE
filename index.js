@@ -4,10 +4,57 @@ const port = process.env.PORT || 8080;
 const wss = new WebSocket.Server({ port: port, host: '0.0.0.0' });
 
 const rooms = new Map();
+const MAX_ROOMS = 100; // サーバー全体の最大ルーム数
+const ROOM_INACTIVITY_LIMIT = 60 * 60 * 1000; // ★追加: 60分 (ミリ秒)
 
 function generateRoomId() {
     return Math.random().toString(36).substring(2, 6).toUpperCase();
 }
+
+// === 接続維持（Heartbeat） ===
+function noop() {}
+
+function heartbeat() {
+    this.isAlive = true;
+}
+
+// 30秒ごとに生存確認 (通信断の検知)
+const heartbeatInterval = setInterval(function ping() {
+    wss.clients.forEach(function each(ws) {
+        if (ws.isAlive === false) return ws.terminate();
+        ws.isAlive = false;
+        ws.ping(noop);
+    });
+}, 30000);
+
+// ★追加: 60分操作がないルームを削除する定期処理 (1分ごとにチェック)
+const cleanupInterval = setInterval(() => {
+    const now = Date.now();
+    rooms.forEach((room, roomId) => {
+        if (now - room.lastActivity > ROOM_INACTIVITY_LIMIT) {
+            console.log(`ルーム ${roomId} は60分間操作がなかったため削除します。`);
+            
+            // ルーム内の全員に通知して切断またはロビーへ戻す
+            broadcast(room, { 
+                type: 'error', 
+                message: '60分間操作がなかったため、ルームはタイムアウトにより削除されました。' 
+            });
+            
+            // ルーム情報の削除
+            rooms.delete(roomId);
+            
+            // 接続しているクライアントのルームID情報をクリア
+            room.players.forEach((_, ws) => {
+                ws.roomId = null;
+            });
+        }
+    });
+}, 60000);
+
+wss.on('close', function close() {
+    clearInterval(heartbeatInterval);
+    clearInterval(cleanupInterval); // ★追加
+});
 
 wss.on('listening', () => {
     console.log(`WebSocketサーバーが ${port} 番ポートで起動しました。`);
@@ -44,7 +91,7 @@ function getLobbyState(room) {
         playerX: playerX_Info,
         spectators: spectators,
         hostUsername: hostInfo ? hostInfo.username : '',
-        playerColors: room.playerColors // プレイヤーごとの色情報
+        playerColors: room.playerColors
     };
 }
 
@@ -54,7 +101,7 @@ function resetReadyStates(room) {
     });
 }
 
-// 〇×ゲームのデフォルト設定
+// 設定オブジェクト
 const ticTacToeSettings = {
     boardSize: 3,
     playerOrder: 'assigned',
@@ -62,9 +109,8 @@ const ticTacToeSettings = {
     highlightOldest: false,
 };
 
-// オセロのデフォルト設定
 const othelloSettings = {
-    boardSize: 8, // オセロは8x8固定
+    boardSize: 8,
     playerOrder: 'assigned',
     limitMode: false,
     highlightOldest: false,
@@ -74,7 +120,6 @@ const othelloSettings = {
 // ゲームロジック
 // =================================================================
 
-// サーバー側 〇×ゲームロジック
 const ticTacToeLogic = {
     generateWinningConditions: (size) => {
         const conditions = [];
@@ -110,7 +155,7 @@ const ticTacToeLogic = {
         room.winningConditions = ticTacToeLogic.generateWinningConditions(size);
         room.oQueue = [];
         room.xQueue = [];
-        room.currentPlayer = 'O'; // 〇×ゲームはOが先手
+        room.currentPlayer = 'O';
     },
 
     handleMove: (room, ws, cellIndex) => {
@@ -119,7 +164,6 @@ const ticTacToeLogic = {
         if (room.currentPlayer !== player) return;
         if (cellIndex < 0 || cellIndex >= room.boardState.length || room.boardState[cellIndex] !== '') return;
 
-        // FIFOモード処理
         if (room.settings.limitMode && room.settings.boardSize === 3) {
             const queue = (player === 'O') ? room.oQueue : room.xQueue;
             if (queue.length >= 3) {
@@ -131,13 +175,12 @@ const ticTacToeLogic = {
 
         room.boardState[cellIndex] = player;
         
-        // 勝利判定
         if (ticTacToeLogic.checkWin(room, player)) {
             broadcast(room, {
                 type: 'boardUpdate',
                 boardState: room.boardState,
                 player: player,
-                nextPlayer: null, // ゲーム終了
+                nextPlayer: null,
                 gameType: 'tictactoe',
                 cellIndex: cellIndex
             });
@@ -148,7 +191,6 @@ const ticTacToeLogic = {
             return;
         }
         
-        // 引き分け判定
         if (ticTacToeLogic.checkDraw(room)) {
             broadcast(room, {
                 type: 'boardUpdate',
@@ -165,7 +207,6 @@ const ticTacToeLogic = {
             return;
         }
 
-        // 次のターン
         const nextPlayer = (player === 'O') ? 'X' : 'O';
         room.currentPlayer = nextPlayer;
         
@@ -193,17 +234,16 @@ const ticTacToeLogic = {
     }
 };
 
-// サーバー側 オセロロジック
 const othelloLogic = {
     directions: [-9, -8, -7, -1, 1, 7, 8, 9],
 
     initializeBoard: (room) => {
         room.boardState = Array(64).fill('');
-        room.boardState[27] = 'X'; // 白
-        room.boardState[36] = 'X'; // 白
-        room.boardState[28] = 'O'; // 黒
-        room.boardState[35] = 'O'; // 黒
-        room.currentPlayer = 'O'; // 黒(O)が先手
+        room.boardState[27] = 'X';
+        room.boardState[36] = 'X';
+        room.boardState[28] = 'O';
+        room.boardState[35] = 'O';
+        room.currentPlayer = 'O';
     },
     
     getFlips: (board, index, player) => {
@@ -268,25 +308,19 @@ const othelloLogic = {
         
         const flips = othelloLogic.getFlips(room.boardState, cellIndex, player);
         
-        if (flips.length === 0) return; // 無効な手
+        if (flips.length === 0) return;
 
-        // 手を適用
         room.boardState[cellIndex] = player;
         flips.forEach(i => room.boardState[i] = player);
         
         let nextPlayer = opponent;
         
-        // 相手の有効手チェック
         let validMoves = othelloLogic.getValidMoves(room.boardState, nextPlayer);
         if (validMoves.length === 0) {
-            // 相手はパス -> 手番を自分に戻す
             nextPlayer = player;
             validMoves = othelloLogic.getValidMoves(room.boardState, nextPlayer);
             
             if (validMoves.length === 0) {
-                // 自分も置けない = ゲーム終了
-                
-                // 1. 最終盤面をboardUpdateとして送信 (ログ/画面更新用)
                 broadcast(room, {
                     type: 'boardUpdate',
                     boardState: room.boardState,
@@ -295,7 +329,6 @@ const othelloLogic = {
                     gameType: 'othello'
                 });
 
-                // 2. ゲーム終了通知
                 room.gameState = 'POST_GAME';
                 const scores = othelloLogic.getScores(room.boardState);
                 let result = 'DRAW';
@@ -306,24 +339,21 @@ const othelloLogic = {
                     type: 'gameOver', 
                     result: result, 
                     scores: scores,
-                    boardState: room.boardState, // 念のため同梱
+                    boardState: room.boardState,
                     gameType: 'othello' 
                 });
                 resetReadyStates(room);
                 return;
             }
             
-            // 相手のみパス（自分はまだ打てる）
-            // 1. 今回の手を更新
             broadcast(room, {
                 type: 'boardUpdate',
                 boardState: room.boardState,
                 player: player,
-                nextPlayer: opponent, // 一旦相手に渡す（直後にパス通知）
+                nextPlayer: opponent,
                 gameType: 'othello'
             });
 
-            // 2. パス通知してターンを戻す
             broadcast(room, {
                 type: 'passTurn',
                 passedPlayer: opponent,
@@ -334,7 +364,6 @@ const othelloLogic = {
             return;
         }
 
-        // 通常のターン移行
         room.currentPlayer = nextPlayer;
         broadcast(room, {
             type: 'boardUpdate',
@@ -350,18 +379,30 @@ const othelloLogic = {
 // === 接続処理 ===
 
 wss.on('connection', (ws) => {
-    console.log('クライアントが接続しました。');
+    ws.isAlive = true;
+    ws.on('pong', heartbeat);
+
     ws.roomId = null;
 
     ws.on('message', (message) => {
         let data;
         try { data = JSON.parse(message); } catch (e) { console.error('Invalid JSON:', e); return; }
         
+        // ★追加: メッセージを受信するたびに、そのルームの最終操作時刻を更新
         const room = rooms.get(ws.roomId);
+        if (room) {
+            room.lastActivity = Date.now();
+        }
+        
         const playerInfo = room ? room.players.get(ws) : null;
 
         switch (data.type) {
             case 'createRoom': {
+                if (rooms.size >= MAX_ROOMS) {
+                    ws.send(JSON.stringify({ type: 'error', message: 'サーバーが混雑しています。ルームを作成できません。' }));
+                    return;
+                }
+
                 let roomId;
                 do { roomId = generateRoomId(); } while (rooms.has(roomId));
                 
@@ -384,7 +425,7 @@ wss.on('connection', (ws) => {
                     players: new Map(),
                     playerO: null,
                     playerX: null,
-                    playerColors: { O: null, X: null }, // 色管理追加
+                    playerColors: { O: null, X: null },
                     gameState: 'LOBBY',
                     host: ws,
                     isPublic: settings.isPublic, 
@@ -393,7 +434,8 @@ wss.on('connection', (ws) => {
                     boardState: [], 
                     currentPlayer: 'O',
                     oQueue: [],
-                    xQueue: []
+                    xQueue: [],
+                    lastActivity: Date.now() // ★追加: 作成時刻を初期値として記録
                 };
                 
                 newRoom.players.set(ws, { 
@@ -431,6 +473,8 @@ wss.on('connection', (ws) => {
                     ws.send(JSON.stringify({ type: 'error', message: 'ルームは満員です。' })); return;
                 }
 
+                // 参加時もアクティビティ更新（上の共通処理で更新済みだが、部屋がない場合のエラー前に弾かれるのでここで更新する必要はない）
+                
                 let mark = 'SPECTATOR';
                 if (joinedRoom.gameState !== 'LOBBY') {
                     mark = 'SPECTATOR';
@@ -444,6 +488,9 @@ wss.on('connection', (ws) => {
                     messageTimestamps: []
                 });
                 ws.roomId = roomId;
+
+                // ★追加: 参加アクションでも時刻更新
+                joinedRoom.lastActivity = Date.now();
 
                 const response = { 
                     type: 'roomJoined', 
@@ -530,12 +577,11 @@ wss.on('connection', (ws) => {
                 let targetSlot = data.slot; 
                 let requestedColor = data.color || null; 
                 
-                // 色重複チェック
                 const opponentSlot = targetSlot === 'O' ? 'X' : 'O';
                 const opponentColor = room.playerColors[opponentSlot];
                 
                 if (requestedColor && opponentColor === requestedColor) {
-                    requestedColor = null; // 強制リセット
+                    requestedColor = null; 
                 }
 
                 if (targetSlot === 'O' && !room.playerO) {
@@ -562,10 +608,10 @@ wss.on('connection', (ws) => {
 
                 if (room.playerO === ws) {
                     room.playerO = null;
-                    room.playerColors.O = null; // 色リセット
+                    room.playerColors.O = null;
                 } else if (room.playerX === ws) {
                     room.playerX = null;
-                    room.playerColors.X = null; // 色リセット
+                    room.playerColors.X = null;
                 } else {
                     return;
                 }
@@ -660,8 +706,6 @@ wss.on('connection', (ws) => {
                     
                     room.playerO = oPlayer;
                     room.playerX = xPlayer;
-                    // playerColorsはスロットと紐づくため、先手後手が入れ替わっても「Oスロットの人はOの色」を使う
-                    // ※ここでは「Oスロット＝先手」という管理なので、スロット交換はしない
 
                     if (room.gameType === 'tictactoe') {
                         ticTacToeLogic.initializeBoard(room);
@@ -820,6 +864,9 @@ wss.on('connection', (ws) => {
     ws.on('close', () => {
         const room = rooms.get(ws.roomId);
         if (room) {
+            // 退室でも更新する（誰か一人が抜けても、まだ誰か残っていれば部屋はアクティブ）
+            room.lastActivity = Date.now();
+
             const playerInfo = room.players.get(ws);
             const username = playerInfo ? playerInfo.username : '不明なユーザー';
             

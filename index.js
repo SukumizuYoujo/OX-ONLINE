@@ -115,52 +115,92 @@ const ticTacToeLogic = {
 
     handleMove: (room, ws, cellIndex) => {
         const player = (ws === room.playerO) ? 'O' : 'X';
+        const opponent = player === 'O' ? 'X' : 'O';
         
-        // ターン確認
-        if (room.currentPlayer !== player) {
-            return; // ターンが違う
-        }
-        // マスが空か確認
-        if (cellIndex < 0 || cellIndex >= room.boardState.length || room.boardState[cellIndex] !== '') {
-            return; // マスが空ではないか、無効なindex
+        if (room.currentPlayer !== player) return; // ターンが違う
+        if (cellIndex < 0 || cellIndex > 63 || room.boardState[cellIndex] !== '') return; // マスが空ではない
+        
+        const flips = othelloLogic.getFlips(room.boardState, cellIndex, player);
+        
+        if (flips.length === 0) {
+            return; // 無効な手
         }
 
-        const limitMode = room.settings.limitMode;
-        const boardSize = room.settings.boardSize;
-        
-        if (limitMode && boardSize === 3) {
-            const queue = (player === 'O') ? room.oQueue : room.xQueue;
-            if (queue.length >= 3) {
-                const indexToClear = queue.shift();
-                room.boardState[indexToClear] = '';
-            }
-            queue.push(cellIndex);
-        }
-        
+        // 手を適用
         room.boardState[cellIndex] = player;
-        const nextPlayer = player === 'O' ? 'X' : 'O';
+        flips.forEach(i => room.boardState[i] = player);
         
-        broadcast(room, { 
-            type: 'boardUpdate', 
+        let nextPlayer = opponent;
+        
+        // 相手の有効手チェック
+        let validMoves = othelloLogic.getValidMoves(room.boardState, nextPlayer);
+        if (validMoves.length === 0) {
+            // 相手はパス -> 手番を自分に戻す
+            nextPlayer = player;
+            validMoves = othelloLogic.getValidMoves(room.boardState, nextPlayer);
+            
+            if (validMoves.length === 0) {
+                // ▼▼▼ 修正A: 自分も置けない = ゲーム終了 ▼▼▼
+                
+                // 1. まず「最後の1手」の結果を送信して、クライアントの盤面とログを更新させる
+                broadcast(room, {
+                    type: 'boardUpdate',
+                    boardState: room.boardState,
+                    player: player,      // 今回打った人
+                    nextPlayer: null,    // 次はいないのでnull
+                    gameType: 'othello'
+                });
+
+                // 2. その直後にゲーム終了を通知する
+                room.gameState = 'POST_GAME';
+                const scores = othelloLogic.getScores(room.boardState);
+                let result = 'DRAW';
+                if (scores.O > scores.X) result = 'O';
+                else if (scores.X > scores.O) result = 'X';
+                
+                broadcast(room, { 
+                    type: 'gameOver', 
+                    result: result, 
+                    scores: scores, 
+                    gameType: 'othello' 
+                });
+                resetReadyStates(room);
+                return;
+            }
+            
+            // ▼▼▼ 修正B: 相手のみパス（自分はまだ打てる） ▼▼▼
+            
+            // 1. まず「今回打った手」の結果を送信して、クライアントの盤面とログを更新させる
+            //    (これをしないと、石が置かれないまま「パス」のアラートだけが出る)
+            broadcast(room, {
+                type: 'boardUpdate',
+                boardState: room.boardState,
+                player: player,      // 今回打った人
+                nextPlayer: opponent,// 一旦相手にターンが渡った体裁にする（直後にパス通知が来るため）
+                gameType: 'othello'
+            });
+
+            // 2. 相手のパスを通知し、ターンを自分に戻す
+            broadcast(room, {
+                type: 'passTurn',
+                passedPlayer: opponent,
+                nextPlayer: nextPlayer, // 自分(player)に戻る
+                boardState: room.boardState
+            });
+            room.currentPlayer = nextPlayer;
+            return;
+        }
+
+        // 通常のターン移行
+        room.currentPlayer = nextPlayer;
+        broadcast(room, {
+            type: 'boardUpdate',
             boardState: room.boardState,
-            player: player,      // 今回打ったプレイヤー
-            nextPlayer: null,    // 次のプレイヤーはいない
+            player: player, // 今回置いた人
+            nextPlayer: nextPlayer, // 次の人
             gameType: 'othello'
         });
-        
-        room.currentPlayer = nextPlayer;
-
-        // 勝敗判定
-        if (ticTacToeLogic.checkWin(room, player)) {
-            room.gameState = 'POST_GAME';
-            broadcast(room, { type: 'gameOver', result: player, gameType: 'tictactoe' });
-            resetReadyStates(room);
-        } else if (ticTacToeLogic.checkDraw(room)) {
-            room.gameState = 'POST_GAME';
-            broadcast(room, { type: 'gameOver', result: 'DRAW', gameType: 'tictactoe' });
-            resetReadyStates(room);
-        }
-    },
+    }
     
     checkWin: (room, player) => {
         for (const condition of room.winningConditions) {

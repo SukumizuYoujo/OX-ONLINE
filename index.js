@@ -138,20 +138,20 @@ const ticTacToeLogic = {
             // 相手はパス -> 手番を自分に戻す
             nextPlayer = player;
             validMoves = othelloLogic.getValidMoves(room.boardState, nextPlayer);
-            
+
             if (validMoves.length === 0) {
                 // ▼▼▼ 修正A: 自分も置けない = ゲーム終了 ▼▼▼
                 
-                // 1. まず「最後の1手」の結果を送信して、クライアントの盤面とログを更新させる
+                // 1. 念のため boardUpdate も送っておく（変更なし）
                 broadcast(room, {
                     type: 'boardUpdate',
                     boardState: room.boardState,
-                    player: player,      // 今回打った人
-                    nextPlayer: null,    // 次はいないのでnull
+                    player: player,
+                    nextPlayer: null,
                     gameType: 'othello'
                 });
 
-                // 2. その直後にゲーム終了を通知する
+                // 2. ゲーム終了通知に「boardState」を含める（★ここを追加変更）
                 room.gameState = 'POST_GAME';
                 const scores = othelloLogic.getScores(room.boardState);
                 let result = 'DRAW';
@@ -161,7 +161,8 @@ const ticTacToeLogic = {
                 broadcast(room, { 
                     type: 'gameOver', 
                     result: result, 
-                    scores: scores, 
+                    scores: scores,
+                    boardState: room.boardState, // ★追加: 最終盤面を同梱する
                     gameType: 'othello' 
                 });
                 resetReadyStates(room);

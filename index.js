@@ -142,10 +142,10 @@ const ticTacToeLogic = {
         
         broadcast(room, { 
             type: 'boardUpdate', 
-            cellIndex: cellIndex,
-            player: player,
-            nextPlayer: nextPlayer,
-            gameType: 'tictactoe'
+            boardState: room.boardState,
+            player: player,      // 今回打ったプレイヤー
+            nextPlayer: null,    // 次のプレイヤーはいない
+            gameType: 'othello'
         });
         
         room.currentPlayer = nextPlayer;

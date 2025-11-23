@@ -139,6 +139,7 @@ const ticTacToeLogic = {
                 player: player,
                 nextPlayer: null, // ゲーム終了
                 gameType: 'tictactoe'
+                cellIndex: cellIndex
             });
             
             room.gameState = 'POST_GAME';
@@ -155,6 +156,7 @@ const ticTacToeLogic = {
                 player: player,
                 nextPlayer: null,
                 gameType: 'tictactoe'
+                cellIndex: cellIndex
             });
             
             room.gameState = 'POST_GAME';
@@ -173,6 +175,7 @@ const ticTacToeLogic = {
             player: player,
             nextPlayer: nextPlayer,
             gameType: 'tictactoe'
+            cellIndex: cellIndex
         });
     },
     
